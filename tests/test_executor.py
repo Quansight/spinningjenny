@@ -17,19 +17,29 @@ from spinningjenny._testing import run_for_usecs
     ],
 )
 @pytest.mark.parametrize("n_jobs", [1, 2, 4])
-def test_parallel_thread_map_results(
-    func: Callable, arguments: list[Iterable], n_jobs: int
+@pytest.mark.parametrize("in_order,to_list", [(True, list), (False, sorted)])
+def test_map_results(
+    func: Callable,
+    arguments: list[Iterable],
+    n_jobs: int,
+    in_order: bool,
+    to_list: Callable[[Iterable], list],
 ) -> None:
     """
-    ``map_unordered()`` gives the same results as Python built-in ``map()``.
-
-    Other than order, anyway.
+    ``ThreadPoolExecutor.map()`` gives the exact same results as ``map()`` by
+    default, or if ``in_order=True`` is passed in.  If ``in_order=False``,
+    results may be out of order.
     """
     expected = list(map(func, *arguments))
     with ThreadPoolExecutor(n_jobs) as pool:
-        actual = pool.map_unordered(func, *arguments)
+        actual = pool.map(func, *arguments, in_order=in_order)
         assert not isinstance(actual, list)
-        assert expected == sorted(actual)
+        assert expected == to_list(actual)
+
+        # Omitting in_order= is the same as in_order=True:
+        actual = pool.map(func, *arguments)
+        assert not isinstance(actual, list)
+        assert expected == list(actual)
 
 
 class Resource:
@@ -81,7 +91,7 @@ def test_resource_usage(usecs: int, num_threads: int, buffersize: None | int) ->
         run_for_usecs(usecs)
 
     with ThreadPoolExecutor(num_threads) as executor:
-        result = executor.map_unordered(
+        result = executor.map(
             task, (factory.create() for _ in range(1000)), buffersize=buffersize
         )
         assert len(list(result)) == 1000
@@ -105,17 +115,21 @@ class TasksRun:
             return self.ran
 
 
+@pytest.mark.parametrize("in_order", [True, False])
 @pytest.mark.parametrize("num_threads", [2, 4, 6])
-def test_buffersize_limits_execution_when_no_iteration(num_threads: int) -> None:
+def test_buffersize_limits_execution_when_no_iteration(
+    num_threads: int, in_order: bool
+) -> None:
     """
     If ``buffersize`` is set, at most ``buffersize + num_threads`` tasks can be
     executed before work stops so long as no iteration is happening.
     """
     tasks = TasksRun()
     with ThreadPoolExecutor(num_threads) as executor:
-        result = executor.map_unordered(
-            lambda _: tasks.run(), range(100), buffersize=20
+        result = executor.map(
+            lambda _: tasks.run(), range(100), buffersize=20, in_order=in_order
         )
+        # _is_full() is a private API specifically designed for testing:
         while not result._is_full():
             pass
         ran = tasks.get_ran()
@@ -153,7 +167,7 @@ def test_drop_without_iterating_over_all_items(buffersize: None | int) -> None:
         return x
 
     with ThreadPoolExecutor(2) as executor:
-        iterator = executor.map_unordered(inc, range(1000), buffersize=buffersize)
+        iterator = executor.map(inc, range(1000), buffersize=buffersize)
         next(iterator)
         del iterator
 
@@ -165,7 +179,7 @@ def test_drop_without_iterating_over_all_items(buffersize: None | int) -> None:
 def test_drop_does_not_panic() -> None:
     """Dropping the results iterator doesn't panic."""
     executor = ThreadPoolExecutor(2)
-    it = executor.map_unordered(lambda x: x, range(1000), buffersize=5)
+    it = executor.map(lambda x: x, range(1000), buffersize=5)
     next(it)
     del it
 
@@ -175,4 +189,4 @@ def test_bad_buffersize() -> None:
     with ThreadPoolExecutor(2) as pool:
         for i in [-100, -1, 0]:
             with pytest.raises(ValueError, match="buffersize must be"):
-                pool.map_unordered(lambda x: 1, range(2), buffersize=i)
+                pool.map(lambda x: 1, range(2), buffersize=i)

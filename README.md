@@ -15,5 +15,5 @@ Correctness:
 
 More flexibility in API design:
 
-* `map_unordered()`, allowing for results to be returned when finished, rather than in order.
-  This makes it easier to run faster.
+* `map(func, *iterables, in_order=False)` allows for results to be returned when finished, rather than in order.
+  This can speed up execution slightly.

@@ -19,8 +19,8 @@ def noop(_x):
 
 
 class OrigExecutor(OrigExecutor):
-    def map_unordered(self, *args, **kwargs):
-        return super().map(*args, **kwargs)
+    def map(self, *args, buffersize=None, in_order=True):
+        return super().map(*args, buffersize=None)
 
 
 class Sequential:
@@ -33,7 +33,7 @@ class Sequential:
     def __exit__(self, *args):
         return False
 
-    def map_unordered(self, func, args, buffersize=None):
+    def map(self, func, args, buffersize=None, in_order=True):
         return (func(arg) for arg in args)
 
 
@@ -42,11 +42,12 @@ class Sequential:
 @pytest.mark.parametrize(
     "executor_factory", [OrigExecutor, SpinExecutor, thread_local_pool, Sequential]
 )
+@pytest.mark.parametrize("in_order", [True, False])
 def test_one_thousand_calls(benchmark, buffersize, function, executor_factory):
     def run():
         with executor_factory(8) as executor:
-            result = executor.map_unordered(
-                function, range(1000), buffersize=buffersize
+            result = executor.map(
+                function, range(1000), buffersize=buffersize, in_order=in_order
             )
             return list(result)
 

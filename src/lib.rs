@@ -132,13 +132,14 @@ mod spinningjenny {
             })
         }
 
-        #[pyo3(signature = (func, *iterables, buffersize = None))]
-        fn map_unordered(
+        #[pyo3(signature = (func, *iterables, buffersize = None, in_order = true))]
+        fn map(
             &self,
             py: Python<'_>,
             func: Py<PyAny>,
             mut iterables: Vec<Py<PyAny>>,
             buffersize: Option<isize>,
+            in_order: bool,
         ) -> PyResult<Py<ResultIter>> {
             // Copy the current contextvars context:
             let context = self.copy_context.call0(py)?;
