@@ -59,14 +59,14 @@ mod spinningjenny {
     }
 
     thread_local! {
-        // The `contextvars` Context to run functions in.
+        // A cached copy of the `contextvars` Context to run functions in.
         pub static CONTEXTVARS_CONTEXT: RefCell<Option<Py<PyAny>>> = const { RefCell::new(None) };
-        // Each `map_unordered()` call in the current thread increments the
-        // generation, so we can distinguish contexts between them..
+        // The current generation of `contextvars` Context; if this changes, a
+        // new copy of the parent context will need to be made.
         pub static GENERATION: Cell<u64> = const { Cell::new(0) };
     }
 
-    /// Each `map_unordered()` call in the increments the global generation, so
+    /// Each `map()` call in the increments the global generation, so
     /// we can distinguish contexts between them.
     static GLOBAL_GENERATION: AtomicU64 = AtomicU64::new(0);
 
@@ -165,8 +165,7 @@ mod spinningjenny {
 
             let n_threads = self.pool.current_num_threads();
             // Iterate over the Python iterator in the thread pool, and spawn
-            // tasks there. The LIFO nature of Rayon's spawn() should ensure
-            // lazy iteration over the Python iterator.
+            // tasks there.
             self.pool.spawn(move || {
                 let orig_sender = sender.clone();
                 let result = Python::attach(move |iterating_py| {
