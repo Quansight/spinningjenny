@@ -6,6 +6,7 @@ use pyo3::prelude::*;
 mod spinningjenny {
     use std::{
         cell::{Cell, RefCell},
+        collections::{BTreeMap, btree_map::Entry},
         sync::{
             Mutex,
             atomic::{AtomicU64, Ordering},
@@ -16,13 +17,16 @@ mod spinningjenny {
     use pyo3::{exceptions::PyValueError, intern, prelude::*, types::PyTuple};
     use rayon::{ThreadPool, ThreadPoolBuilder};
 
+    /// Result of calling a function.
+    type PyOutcome = PyResult<Py<PyAny>>;
+
     #[pyclass]
-    struct ResultIter {
-        receiver: Mutex<Receiver<PyResult<Py<PyAny>>>>,
+    struct UnorderedResultIter {
+        receiver: Mutex<Receiver<PyOutcome>>,
     }
 
-    impl ResultIter {
-        fn new(receiver: Receiver<PyResult<Py<PyAny>>>) -> Self {
+    impl UnorderedResultIter {
+        fn new(receiver: Receiver<PyOutcome>) -> Self {
             Self {
                 receiver: Mutex::new(receiver),
             }
@@ -30,12 +34,12 @@ mod spinningjenny {
     }
 
     #[pymethods]
-    impl ResultIter {
+    impl UnorderedResultIter {
         fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
             slf
         }
 
-        fn __next__(&self, py: Python<'_>) -> Option<PyResult<Py<PyAny>>> {
+        fn __next__(&self, py: Python<'_>) -> Option<PyOutcome> {
             // Avoid blocking here, so we have consistent lock acquisition order
             // and don't deadlock. First, non-blocking fast pass:
             if let Some(result) = self
@@ -55,6 +59,122 @@ mod spinningjenny {
         fn _is_full(&self, py: Python<'_>) -> bool {
             let receiver = &self.receiver;
             py.detach(|| receiver.lock().unwrap().is_full())
+        }
+    }
+
+    struct OrderedResults<M> {
+        // Receives pairs of (message sequence id, message):
+        receiver: Receiver<(usize, M)>,
+        next_message_id: usize,
+        later_messages: BTreeMap<usize, M>,
+    }
+
+    struct WouldBlock;
+
+    impl<M> OrderedResults<M> {
+        fn new(receiver: Receiver<(usize, M)>) -> Self {
+            Self {
+                receiver,
+                next_message_id: 0,
+                later_messages: BTreeMap::new(),
+            }
+        }
+
+        /// Return next message in a non-blocking manner.
+        fn try_next(&mut self) -> Result<M, WouldBlock> {
+            // First, check if we already received it.
+            if let Some(entry) = self.later_messages.first_entry()
+                && entry.key() == &self.next_message_id
+            {
+                return Ok(entry.remove());
+            }
+
+            // Next, check if it's in the receiver queue.
+            for _ in 0..8 {
+                if let Some((id, message)) = self.receiver.try_recv().ok() {
+                    if id == self.next_message_id {
+                        return Ok(message);
+                    } else {
+                        self.later_messages.insert(id, message);
+                    }
+                } else {
+                    break;
+                }
+            }
+
+            // Failed to get a result without blocking:
+            Err(WouldBlock)
+        }
+
+        /// Return next message in blocking manner.
+        ///
+        /// `None` means no more messages.
+        fn next(&mut self) -> Option<M> {
+            // First, check if we already received it.
+            if let Some(entry) = self.later_messages.first_entry()
+                && entry.key() == &self.next_message_id
+            {
+                return Some(entry.remove());
+            }
+
+            // Next, check if it's in the receiver queue.
+            while let Some((id, message)) = self.receiver.recv().ok() {
+                if id == self.next_message_id {
+                    return Some(message);
+                } else {
+                    self.later_messages.insert(id, message);
+                }
+            }
+
+            // Out of messages apparently (even if we've buffered some future
+            // messages) since next expected message id was never seen.
+            //
+            // TODO maybe having something in later_messages merits a warning to
+            // the user?
+            None
+        }
+    }
+
+    #[pyclass]
+    struct OrderedResultIter {
+        results: Mutex<OrderedResults<PyOutcome>>,
+    }
+
+    impl OrderedResultIter {
+        fn new(receiver: Receiver<(usize, PyOutcome)>) -> Self {
+            Self {
+                results: Mutex::new(OrderedResults::new(receiver)),
+            }
+        }
+    }
+
+    #[pymethods]
+    impl OrderedResultIter {
+        fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+            slf
+        }
+
+        fn __next__(&self, py: Python<'_>) -> Option<PyOutcome> {
+            // Avoid blocking here, so we have consistent lock acquisition order
+            // and don't deadlock. First, non-blocking fast pass:
+            if let Some(result) = self
+                .results
+                .try_lock()
+                .ok()
+                .and_then(|mut results| results.try_next().ok())
+            {
+                return Some(result);
+            }
+
+            // If that fails, detach from Python and then block on recv():
+            let results = &self.results;
+            py.detach(|| results.lock().unwrap().next())
+        }
+
+        /// Is the receiver buffer full? Intended for use by tests only.
+        fn _is_full(&self, py: Python<'_>) -> bool {
+            let results = &self.results;
+            py.detach(|| results.lock().unwrap().receiver.is_full())
         }
     }
 
@@ -140,7 +260,7 @@ mod spinningjenny {
             mut iterables: Vec<Py<PyAny>>,
             buffersize: Option<isize>,
             in_order: bool,
-        ) -> PyResult<Py<ResultIter>> {
+        ) -> PyResult<Py<UnorderedResultIter>> {
             // Copy the current contextvars context:
             let context = self.copy_context.call0(py)?;
             // zip(*((itertools.repeat(func),) + iterables)), so we can get
@@ -213,7 +333,7 @@ mod spinningjenny {
                     let _ = orig_sender.send(Err(err));
                 }
             });
-            Py::new(py, ResultIter::new(receiver))
+            Py::new(py, UnorderedResultIter::new(receiver))
         }
 
         fn __enter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
