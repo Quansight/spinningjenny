@@ -6,7 +6,8 @@ use pyo3::prelude::*;
 mod spinningjenny {
     use std::{
         cell::{Cell, RefCell},
-        collections::{BTreeMap, btree_map::Entry},
+        collections::BTreeMap,
+        num::NonZeroU8,
         sync::{
             Mutex,
             atomic::{AtomicU64, Ordering},
@@ -22,11 +23,11 @@ mod spinningjenny {
 
     #[pyclass]
     struct UnorderedResultIter {
-        receiver: Mutex<Receiver<PyOutcome>>,
+        receiver: Mutex<Receiver<(usize, PyOutcome)>>,
     }
 
     impl UnorderedResultIter {
-        fn new(receiver: Receiver<PyOutcome>) -> Self {
+        fn new(receiver: Receiver<(usize, PyOutcome)>) -> Self {
             Self {
                 receiver: Mutex::new(receiver),
             }
@@ -42,7 +43,7 @@ mod spinningjenny {
         fn __next__(&self, py: Python<'_>) -> Option<PyOutcome> {
             // Avoid blocking here, so we have consistent lock acquisition order
             // and don't deadlock. First, non-blocking fast pass:
-            if let Some(result) = self
+            if let Some((_, result)) = self
                 .receiver
                 .try_lock()
                 .ok()
@@ -52,7 +53,7 @@ mod spinningjenny {
             }
             // If that fails, detach from Python and then block on recv():
             let receiver = &self.receiver;
-            py.detach(|| receiver.lock().unwrap().recv().ok())
+            py.detach(|| receiver.lock().unwrap().recv().ok().map(|result| result.1))
         }
 
         /// Is the receiver buffer full? Intended for use by tests only.
@@ -62,21 +63,30 @@ mod spinningjenny {
         }
     }
 
+    /// Convert a series of (message index, message) into an ordered series of
+    /// messages.
+    ///
+    /// Generic in order to facilitate direct testing of the algorithm.
     struct OrderedResults<M> {
         // Receives pairs of (message sequence id, message):
         receiver: Receiver<(usize, M)>,
         next_message_id: usize,
+        // Map from message id to message, for ids higher than next_message_id:
         later_messages: BTreeMap<usize, M>,
+        // How many times to try to load from the receiver if the latest message
+        // isn't queued in later_messages:
+        retries: NonZeroU8,
     }
 
     struct WouldBlock;
 
     impl<M> OrderedResults<M> {
-        fn new(receiver: Receiver<(usize, M)>) -> Self {
+        fn new(receiver: Receiver<(usize, M)>, retries: u8) -> Self {
             Self {
                 receiver,
                 next_message_id: 0,
                 later_messages: BTreeMap::new(),
+                retries: NonZeroU8::new(retries).unwrap(),
             }
         }
 
@@ -86,13 +96,15 @@ mod spinningjenny {
             if let Some(entry) = self.later_messages.first_entry()
                 && entry.key() == &self.next_message_id
             {
+                self.next_message_id += 1;
                 return Ok(entry.remove());
             }
 
             // Next, check if it's in the receiver queue.
-            for _ in 0..8 {
+            for _ in 0..self.retries.into() {
                 if let Some((id, message)) = self.receiver.try_recv().ok() {
                     if id == self.next_message_id {
+                        self.next_message_id += 1;
                         return Ok(message);
                     } else {
                         self.later_messages.insert(id, message);
@@ -114,12 +126,14 @@ mod spinningjenny {
             if let Some(entry) = self.later_messages.first_entry()
                 && entry.key() == &self.next_message_id
             {
+                self.next_message_id += 1;
                 return Some(entry.remove());
             }
 
             // Next, check if it's in the receiver queue.
             while let Some((id, message)) = self.receiver.recv().ok() {
                 if id == self.next_message_id {
+                    self.next_message_id += 1;
                     return Some(message);
                 } else {
                     self.later_messages.insert(id, message);
@@ -141,9 +155,9 @@ mod spinningjenny {
     }
 
     impl OrderedResultIter {
-        fn new(receiver: Receiver<(usize, PyOutcome)>) -> Self {
+        fn new(receiver: Receiver<(usize, PyOutcome)>, retries: u8) -> Self {
             Self {
-                results: Mutex::new(OrderedResults::new(receiver)),
+                results: Mutex::new(OrderedResults::new(receiver, retries)),
             }
         }
     }
@@ -260,7 +274,7 @@ mod spinningjenny {
             mut iterables: Vec<Py<PyAny>>,
             buffersize: Option<isize>,
             in_order: bool,
-        ) -> PyResult<Py<UnorderedResultIter>> {
+        ) -> PyResult<Py<PyAny>> {
             // Copy the current contextvars context:
             let context = self.copy_context.call0(py)?;
             // zip(*((itertools.repeat(func),) + iterables)), so we can get
@@ -290,8 +304,13 @@ mod spinningjenny {
             self.pool.spawn(move || {
                 let orig_sender = sender.clone();
                 let result = Python::attach(move |iterating_py| {
-                    for (i, arguments) in py_iterator.bind(iterating_py).into_iter().enumerate() {
-                        let arguments = arguments?.extract::<Py<PyTuple>>()?;
+                    for (message_index, arguments) in
+                        py_iterator.bind(iterating_py).into_iter().enumerate()
+                    {
+                        let arguments = || -> PyResult<Py<PyTuple>> {
+                            Ok(arguments?.extract::<Py<PyTuple>>()?)
+                        }()
+                        .map_err(|err| (message_index, err))?;
                         let context = context.clone_ref(iterating_py);
                         let sender = sender.clone();
                         // This will spawn within the current pool.
@@ -308,11 +327,13 @@ mod spinningjenny {
                                 // We don't want to block while attached, since that
                                 // can block Python GC, resulting in deadlock when
                                 // buffersize is set and these threads block.
-                                if let Err(TrySendError::Full(result)) = sender.try_send(result) {
+                                if let Err(TrySendError::Full(to_resend)) =
+                                    sender.try_send((message_index, result))
+                                {
                                     // If we get an error sending, that
                                     // means the Receiver has been dropped.
                                     // So not much we can do.
-                                    let _ = thread_py.detach(|| sender.send(result));
+                                    let _ = thread_py.detach(|| sender.send(to_resend));
                                 };
                             });
                         });
@@ -321,19 +342,27 @@ mod spinningjenny {
                         // tasks into memory. Other threads should steal from
                         // this one, so just because this one runs out of tasks
                         // doesn't mean no work is being done.
-                        if i.is_multiple_of(4 * n_threads) {
+                        if message_index.is_multiple_of(4 * n_threads) {
                             while rayon::yield_local() != Some(rayon::Yield::Idle) {}
                         }
                     }
-                    PyResult::Ok(())
+                    Result::<(), (usize, PyErr)>::Ok(())
                 });
-                if let Err(err) = result {
+                if let Err((message_index, err)) = result {
                     // If we get an error, that means the Receiver has been
                     // dropped. So not much we can do.
-                    let _ = orig_sender.send(Err(err));
+                    let _ = orig_sender.send((message_index, Err(err)));
                 }
             });
-            Py::new(py, UnorderedResultIter::new(receiver))
+            Ok(if in_order {
+                Py::new(
+                    py,
+                    OrderedResultIter::new(receiver, if buffersize.is_none() { 8 } else { 1 }),
+                )?
+                .into_any()
+            } else {
+                Py::new(py, UnorderedResultIter::new(receiver))?.into_any()
+            })
         }
 
         fn __enter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
