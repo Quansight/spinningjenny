@@ -1,3 +1,5 @@
+//! Low-level logic for ordered mapping.
+
 use crossbeam_channel::Receiver;
 use std::{collections::BTreeMap, num::NonZeroU8};
 
@@ -16,9 +18,11 @@ pub struct OrderedResults<M> {
     retries: NonZeroU8,
 }
 
+/// An error indicating an operation would block.
 pub struct WouldBlock;
 
 impl<M> OrderedResults<M> {
+    /// Create a new instance.
     pub fn new(receiver: Receiver<(usize, M)>, retries: u8) -> Self {
         Self {
             receiver,
@@ -86,6 +90,7 @@ impl<M> OrderedResults<M> {
         None
     }
 
+    /// Is the receiver full?
     pub fn is_full(&self) -> bool {
         self.receiver.is_full()
     }
