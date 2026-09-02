@@ -18,7 +18,7 @@ mod spinningjenny {
     use pyo3::{exceptions::PyValueError, intern, prelude::*, types::PyTuple};
     use rayon::{ThreadPool, ThreadPoolBuilder};
 
-    use crate::ordered::OrderedResults;
+    use crate::ordered::{BatchConsumer, OrderedResults, batched_buffer_tracker};
 
     /// Result of calling a function.
     type PyOutcome = PyResult<Py<PyAny>>;
@@ -71,9 +71,9 @@ mod spinningjenny {
     }
 
     impl OrderedResultIter {
-        fn new(receiver: Receiver<(usize, PyOutcome)>, retries: u8) -> Self {
+        fn new(receiver: Receiver<(usize, PyOutcome)>, batch_consumer: BatchConsumer) -> Self {
             Self {
-                results: Mutex::new(OrderedResults::new(receiver, retries)),
+                results: Mutex::new(OrderedResults::new(receiver, batch_consumer)),
             }
         }
     }
@@ -188,7 +188,7 @@ mod spinningjenny {
             py: Python<'_>,
             func: Py<PyAny>,
             mut iterables: Vec<Py<PyAny>>,
-            buffersize: Option<isize>,
+            buffersize: Option<usize>,
             in_order: bool,
         ) -> PyResult<Py<PyAny>> {
             // Copy the current contextvars context:
@@ -201,14 +201,17 @@ mod spinningjenny {
             let iterables = PyTuple::new(py, iterables)?;
             let py_iterator = self.zip.bind(py).call1(iterables)?.try_iter()?.unbind();
 
-            let (sender, receiver) = if let Some(buffersize) = buffersize {
+            // TODO document !in_order bit, somewhere
+            let (sender, receiver) = if !in_order && let Some(buffersize) = buffersize {
                 if buffersize < 1 {
                     return Err(PyValueError::new_err("buffersize must be >= 1"));
                 }
-                bounded(buffersize as usize)
+                bounded(buffersize)
             } else {
                 unbounded()
             };
+
+            let (batch_consumer, batch_producer) = batched_buffer_tracker(buffersize);
 
             // A unique id for the contextvars context associated with this
             // call.
@@ -261,6 +264,22 @@ mod spinningjenny {
                         if message_index.is_multiple_of(4 * n_threads) {
                             while rayon::yield_local() != Some(rayon::Yield::Idle) {}
                         }
+
+                        // If buffersize is set and in order, we can't rely on
+                        // the producer/consumer channel to constrain this, so
+                        // instead we operate on batches.
+                        if in_order
+                            && let Some(buffer_size) = buffersize
+                            && message_index > 0
+                            && message_index.is_multiple_of(buffer_size)
+                        {
+                            if batch_producer.is_batch_done() {
+                                // Process as much as we can from this batch.
+                                while rayon::yield_now() != Some(rayon::Yield::Idle) {}
+                            }
+                            // Out of tasks to process, so just block.
+                            batch_producer.wait_until_batch_done();
+                        }
                     }
                     Result::<(), (usize, PyErr)>::Ok(())
                 });
@@ -271,11 +290,7 @@ mod spinningjenny {
                 }
             });
             Ok(if in_order {
-                Py::new(
-                    py,
-                    OrderedResultIter::new(receiver, if buffersize.is_none() { 8 } else { 1 }),
-                )?
-                .into_any()
+                Py::new(py, OrderedResultIter::new(receiver, batch_consumer))?.into_any()
             } else {
                 Py::new(py, UnorderedResultIter::new(receiver))?.into_any()
             })
