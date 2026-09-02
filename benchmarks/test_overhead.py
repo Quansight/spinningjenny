@@ -43,7 +43,7 @@ class Sequential:
     "executor_factory", [OrigExecutor, SpinExecutor, thread_local_pool, Sequential]
 )
 @pytest.mark.parametrize("in_order", [True, False])
-def test_one_thousand_calls(benchmark, buffersize, function, executor_factory):
+def test_one_thousand_calls(benchmark, buffersize, function, executor_factory, in_order):
     def run():
         with executor_factory(8) as executor:
             result = executor.map(
