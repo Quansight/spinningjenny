@@ -150,8 +150,11 @@ def test_buffersize_limits_execution_when_no_iteration(
         assert tasks.get_ran() == 100
 
 
+@pytest.mark.parametrize("in_order", [True, False])
 @pytest.mark.parametrize("buffersize", [None, 5])
-def test_drop_without_iterating_over_all_items(buffersize: None | int) -> None:
+def test_drop_without_iterating_over_all_items(
+    buffersize: None | int, in_order: bool
+) -> None:
     """
     Dropping the results iterator doesn't stop execution.
     """
@@ -167,7 +170,9 @@ def test_drop_without_iterating_over_all_items(buffersize: None | int) -> None:
         return x
 
     with ThreadPoolExecutor(2) as executor:
-        iterator = executor.map(inc, range(1000), buffersize=buffersize)
+        iterator = executor.map(
+            inc, range(1000), buffersize=buffersize, in_order=in_order
+        )
         next(iterator)
         del iterator
 
