@@ -189,10 +189,14 @@ def test_drop_without_iterating_over_all_items(
     assert sorted(counter) == list(range(1000))
 
 
-def test_drop_does_not_panic() -> None:
+@pytest.mark.parametrize("in_order", [True, False])
+@pytest.mark.parametrize("buffersize", [None, 5])
+def test_drop_does_not_panic(buffersize: None | int, in_order: bool) -> None:
     """Dropping the results iterator doesn't panic."""
     executor = ThreadPoolExecutor(2)
-    it = executor.map(lambda x: x, range(1000), buffersize=5)
+    it = executor.map(
+        lambda x: x, range(1000), buffersize=buffersize, in_order=in_order
+    )
     next(it)
     del it
 
@@ -217,6 +221,7 @@ def test_in_order_delivery_property_test(
     """
     Messages are delivered in order.
     """
+
     # Messages are only delivered after a random delay, so order is not
     # guaranteed from execution time at least.
     def sleep_and_return(index, nanos):
