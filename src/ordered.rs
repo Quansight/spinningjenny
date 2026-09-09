@@ -171,3 +171,67 @@ impl<M> Drop for OrderedResults<M> {
         self.buffer_size_changed();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossbeam_channel::unbounded;
+    use proptest::option;
+    use proptest::prelude::*;
+
+    proptest! {
+        /// OrderedResults::try_next returns results in order.
+        #[test]
+        fn ordered_results_delivery_try_next(
+            buffer_size in option::of(1..100usize),
+            shuffled_indexes in (0..1000usize)
+                .prop_map(
+                    |range| (0..range).collect::<Vec<usize>>())
+                .prop_shuffle()
+        ) {
+            let expected : Vec<usize> = (0..(shuffled_indexes.len())).collect();
+            let mut result = vec![];
+            let (sender, receiver) = unbounded();
+            let (mut ord_results, _) = OrderedResults::<usize>::new(receiver, buffer_size);
+            for index in shuffled_indexes {
+                sender.send((index, index)).unwrap();
+                // Now try receiving in order:
+                while let Ok(value) = ord_results.try_next() {
+                    result.push(value);
+                }
+            }
+            drop(sender);
+            while let Ok(value) = ord_results.try_next() {
+                result.push(value);
+            }
+            assert_eq!(result, expected);
+        }
+
+        /// OrderedResults::next returns results in order.
+        #[test]
+        fn ordered_results_delivery_next(
+            buffer_size in option::of(1..100usize),
+            shuffled_indexes in (0..1000usize)
+                .prop_map(
+                    |range| (0..range).collect::<Vec<usize>>())
+                .prop_shuffle()
+        ) {
+            let expected : Vec<usize> = (0..(shuffled_indexes.len())).collect();
+            let mut result = vec![];
+            let (sender, receiver) = unbounded();
+            let (mut ord_results, _) = OrderedResults::<usize>::new(receiver, buffer_size);
+
+            let sending_thread = std::thread::spawn(move || {
+                for index in shuffled_indexes {
+                    sender.send((index, index)).unwrap();
+                }
+            });
+
+            for value in std::iter::from_fn(|| ord_results.next()) {
+                result.push(value);
+            }
+            sending_thread.join().unwrap();
+            assert_eq!(result, expected);
+        }
+    }
+}
