@@ -280,14 +280,6 @@ mod spinningjenny {
                         if let Some(ref ordered_producer) = ordered_producer
                             && ordered_producer.is_full()
                         {
-                            // If the consumer is keeping up, the buffer is
-                            // likely to have room, so we won't hit this. If the
-                            // buffer is full, we're already on the slow path
-                            // cause we're about to block! So tell the compiler
-                            // this path is unlikely to run, which does indeed
-                            // speed things up in benchmarking:
-                            std::hint::cold_path();
-
                             // Take the opportunity to process a task.
                             rayon::yield_local();
                             // Next, wait for buffer space to clear up:
