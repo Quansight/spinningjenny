@@ -1,8 +1,9 @@
 from __future__ import annotations
-from time import sleep
+from time import sleep, time_ns
 from threading import Lock, RLock, Condition
 from typing import Callable, Iterable
 
+from hypothesis import given, strategies as st
 import pytest
 
 from spinningjenny import ThreadPoolExecutor
@@ -77,7 +78,9 @@ class ResourceFactory:
 @pytest.mark.parametrize("num_threads", [2, 4, 6])
 @pytest.mark.parametrize("buffersize", [None, 10, 100])
 @pytest.mark.parametrize("in_order", [True, False])
-def test_resource_usage(usecs: int, num_threads: int, buffersize: None | int, in_order: bool) -> None:
+def test_resource_usage(
+    usecs: int, num_threads: int, buffersize: None | int, in_order: bool
+) -> None:
     """
     The amounts of resources used by the executor should be constained.
 
@@ -93,7 +96,10 @@ def test_resource_usage(usecs: int, num_threads: int, buffersize: None | int, in
 
     with ThreadPoolExecutor(num_threads) as executor:
         result = executor.map(
-            task, (factory.create() for _ in range(1000)), buffersize=buffersize, in_order=in_order
+            task,
+            (factory.create() for _ in range(1000)),
+            buffersize=buffersize,
+            in_order=in_order,
         )
         assert len(list(result)) == 1000
     # Give it some leeway in case it goes over:
@@ -199,3 +205,34 @@ def test_bad_buffersize() -> None:
         for i in [-100, -1]:
             with pytest.raises(OverflowError):
                 pool.map(lambda x: 1, range(2), buffersize=i)
+
+
+@given(
+    st.lists(st.integers(0, 100_000), max_size=1000),
+    st.integers(1, 100) | st.none(),
+)
+def test_in_order_delivery_property_test(
+    sleep_nanos: list[int], buffersize: int | None
+) -> None:
+    """
+    Messages are delivered in order.
+    """
+    # Messages are only delivered after a random delay, so order is not
+    # guaranteed from execution time at least.
+    def sleep_and_return(index, nanos):
+        start = time_ns()
+        while time_ns() - start < nanos:
+            pass
+        return index
+
+    with ThreadPoolExecutor(4) as executor:
+        result = list(
+            executor.map(
+                sleep_and_return,
+                range(len(sleep_nanos)),
+                sleep_nanos,
+                buffersize=buffersize,
+            )
+        )
+
+    assert result == list(range(len(sleep_nanos)))

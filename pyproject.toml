@@ -18,6 +18,7 @@ module-name = "spinningjenny._spinningjenny"
 
 [project.optional-dependencies]
 test = [
+  "hypothesis",
   "pytest",
   "pytest-benchmark"
 ]
