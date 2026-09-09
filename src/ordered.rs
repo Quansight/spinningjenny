@@ -24,7 +24,7 @@ impl OrderedBufferState {
         let buffer_full_guard = self.buffer_full.lock().unwrap();
         let _guard = self
             .still_has_space
-            .wait_while(buffer_full_guard, |buffer_full| !*buffer_full)
+            .wait_while(buffer_full_guard, |buffer_full| *buffer_full)
             .unwrap();
     }
 }
@@ -56,7 +56,7 @@ impl<M> OrderedResults<M> {
         let (buffer_state, producer) = if let Some(max_buffer_size) = buffer_size {
             let state = Arc::new(OrderedBufferState {
                 max_buffer_size,
-                buffer_full: Mutex::new(true),
+                buffer_full: Mutex::new(false),
                 still_has_space: Condvar::new(),
             });
             (Some(state.clone()), Some(state))
