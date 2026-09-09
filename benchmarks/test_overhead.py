@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor as OrigExecutor
+from time import time_ns
 
 import pytest
 
@@ -43,7 +44,9 @@ class Sequential:
     "executor_factory", [OrigExecutor, SpinExecutor, thread_local_pool, Sequential]
 )
 @pytest.mark.parametrize("in_order", [True, False])
-def test_one_thousand_calls(benchmark, buffersize, function, executor_factory, in_order):
+def test_one_thousand_calls(
+    benchmark, buffersize, function, executor_factory, in_order
+):
     def run():
         with executor_factory(8) as executor:
             result = executor.map(
@@ -53,3 +56,26 @@ def test_one_thousand_calls(benchmark, buffersize, function, executor_factory, i
 
     result = benchmark(run)
     assert len(result) == 1000
+
+
+@pytest.mark.parametrize("in_order", [True, False])
+def test_adverserial_delays(benchmark, in_order):
+    """
+    A message execution pattern that demonstrates when out-of-order execution
+    is helpful.
+    """
+    sleep_nanos = ([1_000_000] + [1_000] * 99) * 100
+    sleep_nanos.reverse()
+
+    def spin_nanos(nanos):
+        start = time_ns()
+        while time_ns() - start < nanos:
+            pass
+
+    def run():
+        with SpinExecutor(4) as executor:
+            list(
+                executor.map(spin_nanos, sleep_nanos, buffersize=100, in_order=in_order)
+            )
+
+    benchmark(run)
