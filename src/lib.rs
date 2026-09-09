@@ -18,7 +18,7 @@ mod spinningjenny {
     use pyo3::{exceptions::PyValueError, intern, prelude::*, types::PyTuple};
     use rayon::{ThreadPool, ThreadPoolBuilder};
 
-    use crate::ordered::{BatchConsumer, OrderedResults, batched_buffer_tracker};
+    use crate::ordered::OrderedResults;
 
     /// Result of calling a function.
     type PyOutcome = PyResult<Py<PyAny>>;
@@ -71,9 +71,9 @@ mod spinningjenny {
     }
 
     impl OrderedResultIter {
-        fn new(receiver: Receiver<(usize, PyOutcome)>, batch_consumer: BatchConsumer) -> Self {
+        fn new(results: OrderedResults<PyOutcome>) -> Self {
             Self {
-                results: Mutex::new(OrderedResults::new(receiver, batch_consumer)),
+                results: Mutex::new(results),
             }
         }
     }
@@ -201,23 +201,36 @@ mod spinningjenny {
             let iterables = PyTuple::new(py, iterables)?;
             let py_iterator = self.zip.bind(py).call1(iterables)?.try_iter()?.unbind();
 
-            // TODO document !in_order bit, somewhere
-            let (sender, receiver) = if !in_order && let Some(buffersize) = buffersize {
+            let (sender, receiver) = if let Some(buffersize) = buffersize {
                 if buffersize < 1 {
                     return Err(PyValueError::new_err("buffersize must be >= 1"));
                 }
-                bounded(buffersize)
+                if in_order {
+                    // Buffering happens in the OrderedResults instance, so
+                    // don't do anything more than the minimum here.
+                    bounded(buffersize)
+                } else {
+                    bounded(buffersize)
+                }
             } else {
                 unbounded()
             };
 
-            let (batch_consumer, batch_producer) = batched_buffer_tracker(buffersize);
+            let (ordered_results, ordered_producer) = if in_order {
+                let (results, producer) = OrderedResults::new(receiver.clone(), buffersize);
+                (Some(results), producer)
+            } else {
+                (None, None)
+            };
+
+            let n_threads = self.pool.current_num_threads();
+
+            let run_locally_internal = (4 * n_threads).min(buffersize.unwrap_or(usize::MAX));
 
             // A unique id for the contextvars context associated with this
             // call.
             let generation = new_generation();
 
-            let n_threads = self.pool.current_num_threads();
             // Iterate over the Python iterator in the thread pool, and spawn
             // tasks there.
             self.pool.spawn(move || {
@@ -232,7 +245,9 @@ mod spinningjenny {
                         .map_err(|err| (message_index, err))?;
                         let context = context.clone_ref(iterating_py);
                         let sender = sender.clone();
-                        // This will spawn within the current pool.
+
+                        // Schedule running the Python task within Rayon. This
+                        // will spawn within the current pool.
                         rayon::spawn_fifo(move || {
                             Python::attach(move |thread_py| {
                                 let result = thread_local_context(thread_py, context, generation)
@@ -256,29 +271,27 @@ mod spinningjenny {
                                 };
                             });
                         });
+
+                        // If map is in order, there is a buffer size, and the
+                        // buffer is full, we'll need to wait until there is
+                        // room in the downstream buffer to read more tasks from
+                        // the task iterator.
+                        if let Some(ref ordered_producer) = ordered_producer
+                            && ordered_producer.is_full()
+                        {
+                            // Take the opportunity to process a task.
+                            rayon::yield_local();
+                            // Next, wait for buffer space to clear up:
+                            ordered_producer.wait_for_buffer_space();
+                        }
+
                         // Occasionally take a break from iterating to run some
                         // tasks in this thread, so that we don't load too many
                         // tasks into memory. Other threads should steal from
                         // this one, so just because this one runs out of tasks
                         // doesn't mean no work is being done.
-                        if message_index.is_multiple_of(4 * n_threads) {
+                        if message_index > 0 && message_index.is_multiple_of(run_locally_internal) {
                             while rayon::yield_local() != Some(rayon::Yield::Idle) {}
-                        }
-
-                        // If buffersize is set and in order, we can't rely on
-                        // the producer/consumer channel to constrain this, so
-                        // instead we operate on batches.
-                        if in_order
-                            && let Some(buffer_size) = buffersize
-                            && message_index > 0
-                            && message_index.is_multiple_of(buffer_size)
-                        {
-                            if batch_producer.is_batch_done() {
-                                // Process as much as we can from this batch.
-                                while rayon::yield_now() != Some(rayon::Yield::Idle) {}
-                            }
-                            // Out of tasks to process, so just block.
-                            batch_producer.wait_until_batch_done();
                         }
                     }
                     Result::<(), (usize, PyErr)>::Ok(())
@@ -289,8 +302,8 @@ mod spinningjenny {
                     let _ = orig_sender.send((message_index, Err(err)));
                 }
             });
-            Ok(if in_order {
-                Py::new(py, OrderedResultIter::new(receiver, batch_consumer))?.into_any()
+            Ok(if let Some(ordered_results) = ordered_results {
+                Py::new(py, OrderedResultIter::new(ordered_results))?.into_any()
             } else {
                 Py::new(py, UnorderedResultIter::new(receiver))?.into_any()
             })

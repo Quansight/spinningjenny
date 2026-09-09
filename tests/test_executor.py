@@ -76,7 +76,8 @@ class ResourceFactory:
 @pytest.mark.parametrize("usecs", [0, 10, 100])
 @pytest.mark.parametrize("num_threads", [2, 4, 6])
 @pytest.mark.parametrize("buffersize", [None, 10, 100])
-def test_resource_usage(usecs: int, num_threads: int, buffersize: None | int) -> None:
+@pytest.mark.parametrize("in_order", [True, False])
+def test_resource_usage(usecs: int, num_threads: int, buffersize: None | int, in_order: bool) -> None:
     """
     The amounts of resources used by the executor should be constained.
 
@@ -92,7 +93,7 @@ def test_resource_usage(usecs: int, num_threads: int, buffersize: None | int) ->
 
     with ThreadPoolExecutor(num_threads) as executor:
         result = executor.map(
-            task, (factory.create() for _ in range(1000)), buffersize=buffersize
+            task, (factory.create() for _ in range(1000)), buffersize=buffersize, in_order=in_order
         )
         assert len(list(result)) == 1000
     # Give it some leeway in case it goes over:

@@ -6,88 +6,30 @@ use std::{
     sync::{Arc, Condvar, Mutex},
 };
 
-struct BatchState {
-    batch_size: Option<usize>,
-    num_processed: Mutex<usize>,
-    batch_done: Condvar,
+pub struct OrderedBufferState {
+    max_buffer_size: usize,
+    buffer_full: Mutex<bool>,
+    still_has_space: Condvar,
 }
 
-/// Allow thread that is processing potentially unordered messages and
-/// reordering them to tell the producing thread that it has finished consuming
-/// a batch in order.
-pub fn batched_buffer_tracker(batch_size: Option<usize>) -> (BatchConsumer, BatchProducer) {
-    let state = Arc::new(BatchState {
-        batch_size,
-        num_processed: Mutex::new(0),
-        batch_done: Condvar::new(),
-    });
-    (
-        BatchConsumer {
-            state: state.clone(),
-        },
-        BatchProducer { state },
-    )
-}
-
-pub struct BatchConsumer {
-    state: Arc<BatchState>,
-}
-
-pub struct BatchProducer {
-    state: Arc<BatchState>,
-}
-
-impl BatchConsumer {
-    /// Called by the consumer, this notifies the tracker that a message has
-    /// been reordered and has been completely processed. In practice this means
-    /// it was passed on to the caller of the Python iterator.
-    ///
-    /// Once this is called `batch_size` times, the producing thread will be
-    /// notified that it can produce another batch.
-    pub fn processed_message(&self) {
-        // If there is no batch size, no one is waiting on the other side for
-        // notifications, so take a fast path without locking.
-        let Some(batch_size) = self.state.batch_size else {
-            return;
-        };
-        let mut num_processed_guard = self.state.num_processed.lock().unwrap();
-        *num_processed_guard += 1;
-        if *num_processed_guard == batch_size {
-            self.state.batch_done.notify_one();
-        }
-    }
-}
-
-impl BatchProducer {
-    /// Is the batch done?
-    pub fn is_batch_done(&self) -> bool {
-        // If batch_size is None, no batching was required.
-        let Some(batch_size) = self.state.batch_size else {
-            return true;
-        };
-        let num_processed_guard = self.state.num_processed.lock().unwrap();
-        *num_processed_guard == batch_size
+impl OrderedBufferState {
+    /// Is the buffer full?
+    pub fn is_full(&self) -> bool {
+        *self.buffer_full.lock().unwrap()
     }
 
     /// Called by the producer, wait until the consumer has consumed the whole
     /// batch.
-    pub fn wait_until_batch_done(&self) {
-        let Some(batch_size) = self.state.batch_size else {
-            return;
-        };
-        let num_processed_guard = self.state.num_processed.lock().unwrap();
-        let mut num_processed_guard = self
-            .state
-            .batch_done
-            .wait_while(num_processed_guard, |num_processed| {
-                *num_processed < batch_size
-            })
+    pub fn wait_for_buffer_space(&self) {
+        let buffer_full_guard = self.buffer_full.lock().unwrap();
+        let _guard = self
+            .still_has_space
+            .wait_while(buffer_full_guard, |buffer_full| !*buffer_full)
             .unwrap();
-        // Batch is over, consumer is waiting for us, we can now reset the
-        // num_processed counter in preparation for the next batch.
-        *num_processed_guard = 0;
     }
 }
+
+type OrderedBufferProducer = Arc<OrderedBufferState>;
 
 /// Convert a series of (message index, message) into an ordered series of
 /// messages.
@@ -99,7 +41,7 @@ pub struct OrderedResults<M> {
     next_message_id: usize,
     // Map from message id to message, for ids higher than next_message_id:
     later_messages: BTreeMap<usize, M>,
-    batch_consumer: BatchConsumer,
+    buffer_state: Option<Arc<OrderedBufferState>>,
 }
 
 /// An error indicating an operation would block.
@@ -107,19 +49,46 @@ pub struct WouldBlock;
 
 impl<M> OrderedResults<M> {
     /// Create a new instance.
-    pub fn new(receiver: Receiver<(usize, M)>, batch_consumer: BatchConsumer) -> Self {
-        Self {
-            receiver,
-            next_message_id: 0,
-            later_messages: BTreeMap::new(),
-            batch_consumer,
+    pub fn new(
+        receiver: Receiver<(usize, M)>,
+        buffer_size: Option<usize>,
+    ) -> (Self, Option<OrderedBufferProducer>) {
+        let (buffer_state, producer) = if let Some(max_buffer_size) = buffer_size {
+            let state = Arc::new(OrderedBufferState {
+                max_buffer_size,
+                buffer_full: Mutex::new(true),
+                still_has_space: Condvar::new(),
+            });
+            (Some(state.clone()), Some(state))
+        } else {
+            (None, None)
+        };
+        (
+            Self {
+                receiver,
+                next_message_id: 0,
+                later_messages: BTreeMap::new(),
+                buffer_state,
+            },
+            producer,
+        )
+    }
+
+    fn buffer_size_changed(&self) {
+        if let Some(buffer_state) = &self.buffer_state {
+            let current_buffer_size = self.later_messages.len();
+            let mut buffer_full = buffer_state.buffer_full.lock().unwrap();
+            *buffer_full = current_buffer_size >= buffer_state.max_buffer_size;
+            if !(*buffer_full) {
+                buffer_state.still_has_space.notify_one();
+            }
         }
     }
 
     /// Book keeping for a processed message we are about to return to Python.
     fn got_next_message(&mut self) {
         self.next_message_id += 1;
-        self.batch_consumer.processed_message();
+        self.buffer_size_changed();
     }
 
     /// Return next message in a non-blocking manner.
@@ -141,6 +110,7 @@ impl<M> OrderedResults<M> {
                     return Ok(message);
                 } else {
                     self.later_messages.insert(id, message);
+                    self.buffer_size_changed();
                 }
             } else {
                 break;
@@ -171,6 +141,7 @@ impl<M> OrderedResults<M> {
                 return Some(message);
             } else {
                 self.later_messages.insert(id, message);
+                self.buffer_size_changed();
             }
         }
 
@@ -182,8 +153,11 @@ impl<M> OrderedResults<M> {
         None
     }
 
-    /// Is the receiver full?
+    /// Is the buffer full?
     pub fn is_full(&self) -> bool {
-        self.receiver.is_full()
+        self.buffer_state
+            .as_ref()
+            .map(|bs| bs.is_full())
+            .unwrap_or(false)
     }
 }
