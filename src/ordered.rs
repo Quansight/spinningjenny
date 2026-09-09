@@ -153,11 +153,21 @@ impl<M> OrderedResults<M> {
         None
     }
 
-    /// Is the buffer full?
-    pub fn is_full(&self) -> bool {
-        self.buffer_state
-            .as_ref()
-            .map(|bs| bs.is_full())
-            .unwrap_or(false)
+    /// Is the buffer full? Used just for testing.
+    pub fn _is_full(&self) -> bool {
+        self.receiver.is_full()
+            || self
+                .buffer_state
+                .as_ref()
+                .map(|bs| bs.is_full())
+                .unwrap_or(false)
+    }
+}
+
+impl<M> Drop for OrderedResults<M> {
+    fn drop(&mut self) {
+        // Make sure any waiting threads get woken up:
+        self.later_messages.clear();
+        self.buffer_size_changed();
     }
 }

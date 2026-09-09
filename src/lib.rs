@@ -104,7 +104,7 @@ mod spinningjenny {
         /// Is the receiver buffer full? Intended for use by tests only.
         fn _is_full(&self, py: Python<'_>) -> bool {
             let results = &self.results;
-            py.detach(|| results.lock().unwrap().is_full())
+            py.detach(|| results.lock().unwrap()._is_full())
         }
     }
 
@@ -200,15 +200,16 @@ mod spinningjenny {
             iterables.insert(0, func_iterable);
             let iterables = PyTuple::new(py, iterables)?;
             let py_iterator = self.zip.bind(py).call1(iterables)?.try_iter()?.unbind();
+            let n_threads = self.pool.current_num_threads();
 
             let (sender, receiver) = if let Some(buffersize) = buffersize {
                 if buffersize < 1 {
                     return Err(PyValueError::new_err("buffersize must be >= 1"));
                 }
                 if in_order {
-                    // Buffering happens in the OrderedResults instance, so
-                    // don't do anything more than the minimum here.
-                    bounded(buffersize)
+                    // Buffering also happens in the OrderedResults instance, so
+                    // split the difference.
+                    bounded((buffersize / 2).max(1))
                 } else {
                     bounded(buffersize)
                 }
@@ -217,13 +218,14 @@ mod spinningjenny {
             };
 
             let (ordered_results, ordered_producer) = if in_order {
-                let (results, producer) = OrderedResults::new(receiver.clone(), buffersize);
+                let (results, producer) = OrderedResults::new(
+                    receiver.clone(),
+                    buffersize.map(|bsize| (bsize / 2).max(1)),
+                );
                 (Some(results), producer)
             } else {
                 (None, None)
             };
-
-            let n_threads = self.pool.current_num_threads();
 
             let run_locally_internal = (4 * n_threads).min(buffersize.unwrap_or(usize::MAX));
 
@@ -271,7 +273,6 @@ mod spinningjenny {
                                 };
                             });
                         });
-
                         // If map is in order, there is a buffer size, and the
                         // buffer is full, we'll need to wait until there is
                         // room in the downstream buffer to read more tasks from
