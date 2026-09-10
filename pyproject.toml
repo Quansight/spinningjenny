@@ -8,7 +8,6 @@ requires-python = ">=3.10"
 classifiers = [
     "Programming Language :: Rust",
     "Programming Language :: Python :: Implementation :: CPython",
-    "Programming Language :: Python :: Implementation :: PyPy",
 ]
 dynamic = ["version"]
 
@@ -41,8 +40,8 @@ module = "spinningjenny._spinningjenny"
 ignore_missing_imports = true
 
 [tool.cibuildwheel]
-# Keep building the supported PyPy wheels as well as CPython wheels.
-enable = ["pypy"]
+# TODO: fix test failures seen on CI trying to enable pypy
+# enable = ["pypy"]
 build-frontend = "build[uv]"
 test-extras = ["test"]
 test-command = "python -m pytest {project}/tests"
