@@ -2,6 +2,8 @@ from concurrent.futures import ThreadPoolExecutor as OrigExecutor
 from time import time_ns
 
 import pytest
+from joblib import Parallel, delayed
+from sklearn.utils.parallel import Parallel as SkParallel, delayed as SkDelayed
 
 from spinningjenny import ThreadPoolExecutor as SpinExecutor, thread_local_pool
 from spinningjenny._testing import run_for_usecs
@@ -38,10 +40,32 @@ class Sequential:
         return (func(arg) for arg in args)
 
 
+class Joblib:
+    def __init__(self, n_cpus):
+        self.n_cpus = n_cpus
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def map(self, func, args, buffersize=None, in_order=True):
+        func = delayed(func)
+        return Parallel(self.n_cpus)(func(arg) for arg in args)
+
+
+class Sklearn(Joblib):
+    def map(self, func, args, buffersize=None, in_order=True):
+        func = SkDelayed(func)
+        return SkParallel(self.n_cpus)(func(arg) for arg in args)
+
+
 @pytest.mark.parametrize("buffersize", [None, 100])
 @pytest.mark.parametrize("function", [noop, spin_10us, spin_100us])
 @pytest.mark.parametrize(
-    "executor_factory", [OrigExecutor, SpinExecutor, thread_local_pool, Sequential]
+    "executor_factory",
+    [OrigExecutor, SpinExecutor, thread_local_pool, Sequential, Joblib, Sklearn],
 )
 @pytest.mark.parametrize("in_order", [True, False])
 def test_one_thousand_calls(

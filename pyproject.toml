@@ -20,5 +20,10 @@ module-name = "spinningjenny._spinningjenny"
 test = [
   "hypothesis",
   "pytest",
-  "pytest-benchmark"
+]
+
+benchmark = [
+  "pytest-benchmark",
+  "joblib",
+  "scikit-learn",
 ]
