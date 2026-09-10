@@ -45,7 +45,7 @@ jobs:
           python3.14t -m venv venv
           . venv/bin/activate
           pip install --upgrade pip
-          python -m pip install dist/spinningjenny*cp314t*x86_64*.whl
+          python -m pip install dist/spinningjenny*cp314t*.whl
           python -m pip install --only-deps '.[test]'
           pytest tests
       - name: Upload wheels
