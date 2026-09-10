@@ -1,7 +1,8 @@
 from __future__ import annotations
+
+from collections.abc import Callable, Iterable
+from threading import Condition, Lock, RLock
 from time import sleep
-from threading import Lock, RLock, Condition
-from typing import Callable, Iterable
 
 import pytest
 
