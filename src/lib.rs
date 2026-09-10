@@ -6,10 +6,7 @@ use pyo3::prelude::*;
 mod spinningjenny {
     use std::{
         cell::{Cell, RefCell},
-        sync::{
-            Mutex,
-            atomic::{AtomicU64, Ordering},
-        },
+        sync::atomic::{AtomicU64, Ordering},
     };
 
     use crossbeam_channel::{Receiver, TrySendError, bounded, unbounded};
@@ -18,14 +15,12 @@ mod spinningjenny {
 
     #[pyclass]
     struct ResultIter {
-        receiver: Mutex<Receiver<PyResult<Py<PyAny>>>>,
+        receiver: Receiver<PyResult<Py<PyAny>>>,
     }
 
     impl ResultIter {
         fn new(receiver: Receiver<PyResult<Py<PyAny>>>) -> Self {
-            Self {
-                receiver: Mutex::new(receiver),
-            }
+            Self { receiver: receiver }
         }
     }
 
@@ -36,25 +31,19 @@ mod spinningjenny {
         }
 
         fn __next__(&self, py: Python<'_>) -> Option<PyResult<Py<PyAny>>> {
-            // Avoid blocking here, so we have consistent lock acquisition order
-            // and don't deadlock. First, non-blocking fast pass:
-            if let Some(result) = self
-                .receiver
-                .try_lock()
-                .ok()
-                .and_then(|receiver| receiver.try_recv().ok())
-            {
+            // First, non-blocking fast pass:
+            if let Some(result) = self.receiver.try_recv().ok() {
                 return Some(result);
             }
             // If that fails, detach from Python and then block on recv():
             let receiver = &self.receiver;
-            py.detach(|| receiver.lock().unwrap().recv().ok())
+            py.detach(|| receiver.recv().ok())
         }
 
         /// Is the receiver buffer full? Intended for use by tests only.
         fn _is_full(&self, py: Python<'_>) -> bool {
             let receiver = &self.receiver;
-            py.detach(|| receiver.lock().unwrap().is_full())
+            py.detach(|| receiver.is_full())
         }
     }
 
