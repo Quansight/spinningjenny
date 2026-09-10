@@ -40,7 +40,6 @@ jobs:
           rust-toolchain: "1.98.1"
           manylinux: auto
       - name: Install built wheel and test
-        if: matrix.platform.target == 'x86_64'
         run: |
           cargo test
           python3.14t -m venv venv
