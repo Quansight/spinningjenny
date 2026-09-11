@@ -25,11 +25,11 @@ mod spinningjenny {
 
     #[pyclass]
     struct UnorderedResultIter {
-        receiver: Receiver<(usize, PyResult<Py<PyAny>>)>,
+        receiver: Receiver<(usize, PyOutcome)>,
     }
 
     impl UnorderedResultIter {
-        fn new(receiver: Receiver<(usize, PyResult<Py<PyAny>>)>) -> Self {
+        fn new(receiver: Receiver<(usize, PyOutcome)>) -> Self {
             Self { receiver: receiver }
         }
     }
@@ -40,7 +40,7 @@ mod spinningjenny {
             slf
         }
 
-        fn __next__(&self, py: Python<'_>) -> Option<PyResult<Py<PyAny>>> {
+        fn __next__(&self, py: Python<'_>) -> Option<PyOutcome> {
             // First, non-blocking fast pass:
             if let Some((_, result)) = self.receiver.try_recv().ok() {
                 return Some(result);
