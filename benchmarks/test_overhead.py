@@ -83,7 +83,7 @@ def test_one_thousand_calls(
 
 
 @pytest.mark.parametrize("in_order", [True, False])
-def test_adverserial_delays(benchmark, in_order):
+def test_adversarial_delays(benchmark, in_order):
     """
     A message execution pattern that demonstrates when out-of-order execution
     is helpful.
