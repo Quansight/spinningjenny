@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
-from threading import Condition, Event, Lock, RLock
+from threading import Condition, Lock, RLock
 from time import sleep, time_ns
 from typing import TYPE_CHECKING
-if TYPE_CHECKING:
-    from typing import Callable, Iterable
 
-from hypothesis import given, strategies as st
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable
+
 import pytest
+from hypothesis import given
+from hypothesis import strategies as st
 
 from spinningjenny import ThreadPoolExecutor
 from spinningjenny._testing import run_for_usecs
@@ -22,26 +24,26 @@ from spinningjenny._testing import run_for_usecs
     ],
 )
 @pytest.mark.parametrize("n_threads", [1, 2, 4])
-@pytest.mark.parametrize("in_order,to_list", [(True, list), (False, sorted)])
+@pytest.mark.parametrize("return_in_order,to_list", [(True, list), (False, sorted)])
 def test_map_results(
     func: Callable,
     arguments: list[Iterable],
     n_threads: int,
-    in_order: bool,
+    return_in_order: bool,
     to_list: Callable[[Iterable], list],
 ) -> None:
     """
     ``ThreadPoolExecutor.map()`` gives the exact same results as ``map()`` by
-    default, or if ``in_order=True`` is passed in.  If ``in_order=False``,
-    results may be out of order.
+    default, or if ``return_in_order=True`` is passed in.  If
+    ``return_in_order=False``, results may be out of order.
     """
     expected = list(map(func, *arguments))
     with ThreadPoolExecutor(n_threads) as pool:
-        actual = pool.map(func, *arguments, in_order=in_order)
+        actual = pool.map(func, *arguments, return_in_order=return_in_order)
         assert not isinstance(actual, list)
         assert expected == to_list(actual)
 
-        # Omitting in_order= is the same as in_order=True:
+        # Omitting return_in_order= is the same as return_in_order=True:
         actual = pool.map(func, *arguments)
         assert not isinstance(actual, list)
         assert expected == list(actual)
@@ -81,9 +83,9 @@ class ResourceFactory:
 @pytest.mark.parametrize("usecs", [0, 10, 100])
 @pytest.mark.parametrize("num_threads", [1, 2, 4, 5])
 @pytest.mark.parametrize("buffersize", [None, 10, 100])
-@pytest.mark.parametrize("in_order", [True, False])
+@pytest.mark.parametrize("return_in_order", [True, False])
 def test_resource_usage(
-    usecs: int, num_threads: int, buffersize: None | int, in_order: bool
+    usecs: int, num_threads: int, buffersize: None | int, return_in_order: bool
 ) -> None:
     """
     The amounts of resources used by the executor should be constained.
@@ -103,7 +105,7 @@ def test_resource_usage(
             task,
             (factory.create() for _ in range(1000)),
             buffersize=buffersize,
-            in_order=in_order,
+            return_in_order=return_in_order,
         )
         assert len(list(result)) == 1000
     # Give it some leeway in case it goes over:
@@ -126,10 +128,10 @@ class TasksRun:
             return self.ran
 
 
-@pytest.mark.parametrize("in_order", [True, False])
+@pytest.mark.parametrize("return_in_order", [True, False])
 @pytest.mark.parametrize("num_threads", [1, 2, 4, 5])
 def test_buffersize_limits_execution_when_no_iteration(
-    num_threads: int, in_order: bool
+    num_threads: int, return_in_order: bool
 ) -> None:
     """
     If ``buffersize`` is set, at most ``buffersize + num_threads`` tasks can be
@@ -138,7 +140,10 @@ def test_buffersize_limits_execution_when_no_iteration(
     tasks = TasksRun()
     with ThreadPoolExecutor(num_threads) as executor:
         result = executor.map(
-            lambda _: tasks.run(), range(100), buffersize=20, in_order=in_order
+            lambda _: tasks.run(),
+            range(100),
+            buffersize=20,
+            return_in_order=return_in_order,
         )
         # _is_full() is a private API specifically designed for testing:
         while not result._is_full():
@@ -162,10 +167,10 @@ def test_buffersize_limits_execution_when_no_iteration(
         assert tasks.get_ran() == 100
 
 
-@pytest.mark.parametrize("in_order", [True, False])
+@pytest.mark.parametrize("return_in_order", [True, False])
 @pytest.mark.parametrize("buffersize", [None, 5])
 def test_drop_without_iterating_over_all_items(
-    buffersize: None | int, in_order: bool
+    buffersize: None | int, return_in_order: bool
 ) -> None:
     """
     Dropping the results iterator doesn't stop execution.
@@ -183,7 +188,7 @@ def test_drop_without_iterating_over_all_items(
 
     with ThreadPoolExecutor(2) as executor:
         iterator = executor.map(
-            inc, range(1000), buffersize=buffersize, in_order=in_order
+            inc, range(1000), buffersize=buffersize, return_in_order=return_in_order
         )
         next(iterator)
         del iterator
@@ -193,13 +198,13 @@ def test_drop_without_iterating_over_all_items(
     assert sorted(counter) == list(range(1000))
 
 
-@pytest.mark.parametrize("in_order", [True, False])
+@pytest.mark.parametrize("return_in_order", [True, False])
 @pytest.mark.parametrize("buffersize", [None, 5])
-def test_drop_does_not_panic(buffersize: None | int, in_order: bool) -> None:
+def test_drop_does_not_panic(buffersize: None | int, return_in_order: bool) -> None:
     """Dropping the results iterator doesn't panic."""
     executor = ThreadPoolExecutor(2)
     it = executor.map(
-        lambda x: x, range(1000), buffersize=buffersize, in_order=in_order
+        lambda x: x, range(1000), buffersize=buffersize, return_in_order=return_in_order
     )
     next(it)
     del it
@@ -219,7 +224,7 @@ def test_bad_buffersize() -> None:
     st.lists(st.integers(0, 100_000), max_size=1000),
     st.integers(1, 100) | st.none(),
 )
-def test_in_order_delivery_property_test(
+def test_return_in_order_delivery_property_test(
     sleep_nanos: list[int], buffersize: int | None
 ) -> None:
     """

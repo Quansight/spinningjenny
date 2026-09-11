@@ -15,5 +15,5 @@ Correctness:
 
 More flexibility in API design:
 
-* `map(func, *iterables, in_order=False)` allows for results to be returned when finished, rather than in order.
+* `map(func, *iterables, return_in_order=False)` allows for results to be returned when finished, rather than in order.
   This can speed up execution slightly.

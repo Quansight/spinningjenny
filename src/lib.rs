@@ -175,14 +175,14 @@ mod spinningjenny {
             })
         }
 
-        #[pyo3(signature = (func, *iterables, buffersize = None, in_order = true))]
+        #[pyo3(signature = (func, *iterables, buffersize = None, return_in_order = true))]
         fn map(
             &self,
             py: Python<'_>,
             func: Py<PyAny>,
             mut iterables: Vec<Py<PyAny>>,
             buffersize: Option<usize>,
-            in_order: bool,
+            return_in_order: bool,
         ) -> PyResult<Py<PyAny>> {
             // Copy the current contextvars context:
             let context = self.copy_context.call0(py)?;
@@ -199,7 +199,7 @@ mod spinningjenny {
                 if buffersize < 1 {
                     return Err(PyValueError::new_err("buffersize must be >= 1"));
                 }
-                if in_order {
+                if return_in_order {
                     // Buffering also happens in the OrderedResults instance, so
                     // split the difference.
                     bounded((buffersize / 2).max(1))
@@ -210,7 +210,7 @@ mod spinningjenny {
                 unbounded()
             };
 
-            let (ordered_results, ordered_producer) = if in_order {
+            let (ordered_results, ordered_producer) = if return_in_order {
                 let (results, producer) = OrderedResults::new(
                     receiver.clone(),
                     buffersize.map(|bsize| (bsize / 2).max(1)),

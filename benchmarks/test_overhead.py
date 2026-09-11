@@ -3,7 +3,8 @@ from time import time_ns
 
 import pytest
 from joblib import Parallel, delayed
-from sklearn.utils.parallel import Parallel as SkParallel, delayed as SkDelayed
+from sklearn.utils.parallel import Parallel as SkParallel
+from sklearn.utils.parallel import delayed as SkDelayed
 
 from spinningjenny import ThreadPoolExecutor as SpinExecutor
 from spinningjenny import thread_local_pool
@@ -23,7 +24,7 @@ def noop(_x):
 
 
 class OrigExecutor(OrigExecutor):
-    def map(self, *args, buffersize=None, in_order=True):
+    def map(self, *args, buffersize=None, return_in_order=True):
         return super().map(*args, buffersize=buffersize)
 
 
@@ -37,7 +38,7 @@ class Sequential:
     def __exit__(self, *args):
         return False
 
-    def map(self, func, args, buffersize=None, in_order=True):
+    def map(self, func, args, buffersize=None, return_in_order=True):
         return (func(arg) for arg in args)
 
 
@@ -51,13 +52,13 @@ class Joblib:
     def __exit__(self, *args):
         return False
 
-    def map(self, func, args, buffersize=None, in_order=True):
+    def map(self, func, args, buffersize=None, return_in_order=True):
         func = delayed(func)
         return Parallel(self.n_cpus, backend="threading")(func(arg) for arg in args)
 
 
 class Sklearn(Joblib):
-    def map(self, func, args, buffersize=None, in_order=True):
+    def map(self, func, args, buffersize=None, return_in_order=True):
         func = SkDelayed(func)
         return SkParallel(self.n_cpus, backend="threading")(func(arg) for arg in args)
 
@@ -68,14 +69,17 @@ class Sklearn(Joblib):
     "executor_factory",
     [OrigExecutor, SpinExecutor, thread_local_pool, Sequential, Joblib, Sklearn],
 )
-@pytest.mark.parametrize("in_order", [True, False])
+@pytest.mark.parametrize("return_in_order", [True, False])
 def test_one_thousand_calls(
-    benchmark, buffersize, function, executor_factory, in_order
+    benchmark, buffersize, function, executor_factory, return_in_order
 ):
     def run():
         with executor_factory(8) as executor:
             result = executor.map(
-                function, range(1000), buffersize=buffersize, in_order=in_order
+                function,
+                range(1000),
+                buffersize=buffersize,
+                return_in_order=return_in_order,
             )
             return list(result)
 
@@ -83,8 +87,8 @@ def test_one_thousand_calls(
     assert len(result) == 1000
 
 
-@pytest.mark.parametrize("in_order", [True, False])
-def test_adversarial_delays(benchmark, in_order):
+@pytest.mark.parametrize("return_in_order", [True, False])
+def test_adversarial_delays(benchmark, return_in_order):
     """
     A message execution pattern that demonstrates when out-of-order execution
     is helpful.
@@ -100,7 +104,12 @@ def test_adversarial_delays(benchmark, in_order):
     def run():
         with SpinExecutor(4) as executor:
             list(
-                executor.map(spin_nanos, sleep_nanos, buffersize=100, in_order=in_order)
+                executor.map(
+                    spin_nanos,
+                    sleep_nanos,
+                    buffersize=100,
+                    return_in_order=return_in_order,
+                )
             )
 
     benchmark(run)

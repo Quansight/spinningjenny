@@ -49,9 +49,11 @@ def test_tasks_run_with_correct_contextvars(
 
 
 @pytest.mark.parametrize("executor_factory", [ThreadPoolExecutor, thread_local_pool])
-def test_contextvars_interleaved(executor_factory: Callable[[int], ThreadPoolExecutor],
+def test_contextvars_interleaved(
+    executor_factory: Callable[[int], ThreadPoolExecutor],
 ) -> None:
     """Different map calls preserve their contextvar context."""
+
     def get(_):
         return TACH.get()
 
