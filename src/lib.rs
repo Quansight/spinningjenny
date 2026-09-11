@@ -104,20 +104,21 @@ mod spinningjenny {
             let repeat = py
                 .eval(c"__import__('itertools').repeat", None, None)?
                 .unbind();
+            let pool_builder = ThreadPoolBuilder::new().num_threads(n_threads);
+            // TODO: Remove this version gate once PyO3
+            // restores its attachment count only after reattaching succeeds.
+            #[cfg(Py_3_14)]
+            let pool_builder = pool_builder.spawn_handler(|thread| {
+                // stay detached while idle so parked workers don't
+                // deadlock with the interpreter
+                std::thread::spawn(move || Python::attach(|py| py.detach(|| thread.run())));
+                Ok(())
+            });
             Ok(Self {
                 copy_context,
                 zip,
                 repeat,
-                pool: ThreadPoolBuilder::new()
-                    .num_threads(n_threads)
-                    .spawn_handler(|thread| {
-                        // stay detached while idle so parked workers don't
-                        // deadlock with the interpreter
-                        std::thread::spawn(move || Python::attach(|py| py.detach(|| thread.run())));
-                        Ok(())
-                    })
-                    .build()
-                    .expect("TODO handle error"),
+                pool: pool_builder.build().expect("TODO handle error"),
             })
         }
 

@@ -2,7 +2,8 @@ from concurrent.futures import ThreadPoolExecutor as OrigExecutor
 
 import pytest
 
-from spinningjenny import ThreadPoolExecutor as SpinExecutor, thread_local_pool
+from spinningjenny import ThreadPoolExecutor as SpinExecutor
+from spinningjenny import thread_local_pool
 from spinningjenny._testing import run_for_usecs
 
 
