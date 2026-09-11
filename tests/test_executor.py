@@ -21,12 +21,12 @@ from spinningjenny._testing import run_for_usecs
         (lambda a, b: a + b, [range(1, 1001), range(2, 1002)]),
     ],
 )
-@pytest.mark.parametrize("n_jobs", [1, 2, 4])
+@pytest.mark.parametrize("n_threads", [1, 2, 4])
 @pytest.mark.parametrize("in_order,to_list", [(True, list), (False, sorted)])
 def test_map_results(
     func: Callable,
     arguments: list[Iterable],
-    n_jobs: int,
+    n_threads: int,
     in_order: bool,
     to_list: Callable[[Iterable], list],
 ) -> None:
@@ -36,7 +36,7 @@ def test_map_results(
     results may be out of order.
     """
     expected = list(map(func, *arguments))
-    with ThreadPoolExecutor(n_jobs) as pool:
+    with ThreadPoolExecutor(n_threads) as pool:
         actual = pool.map(func, *arguments, in_order=in_order)
         assert not isinstance(actual, list)
         assert expected == to_list(actual)
