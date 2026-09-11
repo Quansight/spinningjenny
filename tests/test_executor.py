@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
-from threading import Condition, Lock, RLock
+from threading import Condition, Event, Lock, RLock
 from time import sleep, time_ns
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
@@ -79,7 +79,7 @@ class ResourceFactory:
 
 
 @pytest.mark.parametrize("usecs", [0, 10, 100])
-@pytest.mark.parametrize("num_threads", [2, 4, 6])
+@pytest.mark.parametrize("num_threads", [1, 2, 4, 5])
 @pytest.mark.parametrize("buffersize", [None, 10, 100])
 @pytest.mark.parametrize("in_order", [True, False])
 def test_resource_usage(
@@ -127,7 +127,7 @@ class TasksRun:
 
 
 @pytest.mark.parametrize("in_order", [True, False])
-@pytest.mark.parametrize("num_threads", [2, 4, 6])
+@pytest.mark.parametrize("num_threads", [1, 2, 4, 5])
 def test_buffersize_limits_execution_when_no_iteration(
     num_threads: int, in_order: bool
 ) -> None:
