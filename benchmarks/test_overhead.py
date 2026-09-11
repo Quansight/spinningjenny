@@ -23,7 +23,7 @@ def noop(_x):
 
 class OrigExecutor(OrigExecutor):
     def map(self, *args, buffersize=None, in_order=True):
-        return super().map(*args, buffersize=None)
+        return super().map(*args, buffersize=buffersize)
 
 
 class Sequential:
