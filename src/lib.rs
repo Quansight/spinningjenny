@@ -276,7 +276,7 @@ mod spinningjenny {
                             // Take the opportunity to process a task.
                             rayon::yield_local();
                             // Next, wait for buffer space to clear up:
-                            ordered_producer.wait_for_buffer_space();
+                            iterating_py.detach(|| ordered_producer.wait_for_buffer_space());
                         }
 
                         // Occasionally take a break from iterating to run some
