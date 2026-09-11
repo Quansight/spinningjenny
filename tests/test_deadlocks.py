@@ -35,6 +35,7 @@ def test_no_interpreter_deadlock(code):
         proc = subprocess.run(
             [sys.executable, "-c", code],
             capture_output=True,
+            check=False,
             text=True,
             timeout=TIMEOUT,
         )

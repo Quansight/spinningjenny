@@ -1,4 +1,5 @@
 import threading
+
 from ._spinningjenny import ThreadPoolExecutor
 
 __all__ = ["ThreadPoolExecutor", "thread_local_pool"]

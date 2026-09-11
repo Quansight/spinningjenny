@@ -281,6 +281,7 @@ dependencies = [
  "crossbeam-channel",
  "proptest",
  "pyo3",
+ "pyo3-build-config",
  "rayon",
 ]
 

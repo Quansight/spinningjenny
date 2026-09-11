@@ -5,7 +5,8 @@ import pytest
 from joblib import Parallel, delayed
 from sklearn.utils.parallel import Parallel as SkParallel, delayed as SkDelayed
 
-from spinningjenny import ThreadPoolExecutor as SpinExecutor, thread_local_pool
+from spinningjenny import ThreadPoolExecutor as SpinExecutor
+from spinningjenny import thread_local_pool
 from spinningjenny._testing import run_for_usecs
 
 

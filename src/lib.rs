@@ -25,14 +25,12 @@ mod spinningjenny {
 
     #[pyclass]
     struct UnorderedResultIter {
-        receiver: Mutex<Receiver<(usize, PyOutcome)>>,
+        receiver: Receiver<(usize, PyResult<Py<PyAny>>)>,
     }
 
     impl UnorderedResultIter {
-        fn new(receiver: Receiver<(usize, PyOutcome)>) -> Self {
-            Self {
-                receiver: Mutex::new(receiver),
-            }
+        fn new(receiver: Receiver<(usize, PyResult<Py<PyAny>>)>) -> Self {
+            Self { receiver: receiver }
         }
     }
 
@@ -42,26 +40,20 @@ mod spinningjenny {
             slf
         }
 
-        fn __next__(&self, py: Python<'_>) -> Option<PyOutcome> {
-            // Avoid blocking here, so we have consistent lock acquisition order
-            // and don't deadlock. First, non-blocking fast pass:
-            if let Some((_, result)) = self
-                .receiver
-                .try_lock()
-                .ok()
-                .and_then(|receiver| receiver.try_recv().ok())
-            {
+        fn __next__(&self, py: Python<'_>) -> Option<PyResult<Py<PyAny>>> {
+            // First, non-blocking fast pass:
+            if let Some((_, result)) = self.receiver.try_recv().ok() {
                 return Some(result);
             }
             // If that fails, detach from Python and then block on recv():
             let receiver = &self.receiver;
-            py.detach(|| receiver.lock().unwrap().recv().ok().map(|result| result.1))
+            py.detach(|| receiver.recv().ok().map(|result| result.1))
         }
 
         /// Is the receiver buffer full? Intended for use by tests only.
         fn _is_full(&self, py: Python<'_>) -> bool {
             let receiver = &self.receiver;
-            py.detach(|| receiver.lock().unwrap().is_full())
+            py.detach(|| receiver.is_full())
         }
     }
 
@@ -165,20 +157,21 @@ mod spinningjenny {
             let repeat = py
                 .eval(c"__import__('itertools').repeat", None, None)?
                 .unbind();
+            let pool_builder = ThreadPoolBuilder::new().num_threads(n_threads);
+            // TODO: Remove this version gate once PyO3
+            // restores its attachment count only after reattaching succeeds.
+            #[cfg(Py_3_14)]
+            let pool_builder = pool_builder.spawn_handler(|thread| {
+                // stay detached while idle so parked workers don't
+                // deadlock with the interpreter
+                std::thread::spawn(move || Python::attach(|py| py.detach(|| thread.run())));
+                Ok(())
+            });
             Ok(Self {
                 copy_context,
                 zip,
                 repeat,
-                pool: ThreadPoolBuilder::new()
-                    .num_threads(n_threads)
-                    .spawn_handler(|thread| {
-                        // stay detached while idle so parked workers don't
-                        // deadlock with the interpreter
-                        std::thread::spawn(move || Python::attach(|py| py.detach(|| thread.run())));
-                        Ok(())
-                    })
-                    .build()
-                    .expect("TODO handle error"),
+                pool: pool_builder.build().expect("TODO handle error"),
             })
         }
 

@@ -1,13 +1,12 @@
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from contextvars import ContextVar
-from typing import Callable
 
 import pytest
 
 from spinningjenny import ThreadPoolExecutor, thread_local_pool
 
-TACH = ContextVar("Tachyon readings")
+TACH: ContextVar[int] = ContextVar("Tachyon readings")
 
 
 @contextmanager

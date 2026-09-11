@@ -1,7 +1,11 @@
 from __future__ import annotations
+
+from collections.abc import Callable, Iterable
+from threading import Condition, Lock, RLock
 from time import sleep, time_ns
-from threading import Lock, RLock, Condition
-from typing import Callable, Iterable
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from typing import Callable, Iterable
 
 from hypothesis import given, strategies as st
 import pytest
