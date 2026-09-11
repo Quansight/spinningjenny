@@ -74,6 +74,7 @@ impl<M> OrderedResults<M> {
         )
     }
 
+    /// Must be called when the size of `self.later_messages` changes.
     fn buffer_size_changed(&self) {
         if let Some(buffer_state) = &self.buffer_state {
             let current_buffer_size = self.later_messages.len();
@@ -86,33 +87,53 @@ impl<M> OrderedResults<M> {
     }
 
     /// Book keeping for a processed message we are about to return to Python.
-    fn got_next_message(&mut self) {
+    fn about_to_return_next_message(&mut self) {
         self.next_message_id += 1;
         self.buffer_size_changed();
     }
 
-    /// Return next message in a non-blocking manner.
-    pub fn try_next(&mut self) -> Result<M, WouldBlock> {
+    /// Check if the next messages is already available in the buffer, and if so
+    /// return it.
+    fn get_next_if_already_buffered(&mut self) -> Option<M> {
         // First, check if we already received it.
         if let Some(entry) = self.later_messages.first_entry()
             && entry.key() == &self.next_message_id
         {
             let result = entry.remove();
-            self.got_next_message();
-            return Ok(result);
+            self.about_to_return_next_message();
+            Some(result)
+        } else {
+            None
+        }
+    }
+
+    /// Handle a newly arrived message, returning it if it is the next message
+    /// based on message id.
+    fn handle_new_message(&mut self, id: usize, message: M) -> Option<M> {
+        if id == self.next_message_id {
+            self.about_to_return_next_message();
+            Some(message)
+        } else {
+            self.later_messages.insert(id, message);
+            self.buffer_size_changed();
+            None
+        }
+    }
+
+    /// Return next message in a non-blocking manner.
+    pub fn try_next(&mut self) -> Result<M, WouldBlock> {
+        if let Some(message) = self.get_next_if_already_buffered() {
+            return Ok(message);
         }
 
         // Next, check if it's in the receiver queue.
         for _ in 0..8 {
             if let Some((id, message)) = self.receiver.try_recv().ok() {
-                if id == self.next_message_id {
-                    self.got_next_message();
+                if let Some(message) = self.handle_new_message(id, message) {
                     return Ok(message);
-                } else {
-                    self.later_messages.insert(id, message);
-                    self.buffer_size_changed();
                 }
             } else {
+                // No message in the receiver, and we don't want to block:
                 break;
             }
         }
@@ -125,23 +146,14 @@ impl<M> OrderedResults<M> {
     ///
     /// `None` means no more messages.
     pub fn next(&mut self) -> Option<M> {
-        // First, check if we already received it.
-        if let Some(entry) = self.later_messages.first_entry()
-            && entry.key() == &self.next_message_id
-        {
-            let result = entry.remove();
-            self.got_next_message();
-            return Some(result);
+        if let Some(message) = self.get_next_if_already_buffered() {
+            return Some(message);
         }
 
         // Next, check if it's in the receiver queue.
         while let Some((id, message)) = self.receiver.recv().ok() {
-            if id == self.next_message_id {
-                self.got_next_message();
+            if let Some(message) = self.handle_new_message(id, message) {
                 return Some(message);
-            } else {
-                self.later_messages.insert(id, message);
-                self.buffer_size_changed();
             }
         }
 
