@@ -52,13 +52,13 @@ class Joblib:
 
     def map(self, func, args, buffersize=None, in_order=True):
         func = delayed(func)
-        return Parallel(self.n_cpus)(func(arg) for arg in args)
+        return Parallel(self.n_cpus, backend="threading")(func(arg) for arg in args)
 
 
 class Sklearn(Joblib):
     def map(self, func, args, buffersize=None, in_order=True):
         func = SkDelayed(func)
-        return SkParallel(self.n_cpus)(func(arg) for arg in args)
+        return SkParallel(self.n_cpus, backend="threading")(func(arg) for arg in args)
 
 
 @pytest.mark.parametrize("buffersize", [None, 100])
