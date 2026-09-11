@@ -20,7 +20,7 @@ import gc
 import spinningjenny
 
 executor = spinningjenny.ThreadPoolExecutor(1)
-list(executor.map_unordered(lambda _: gc.collect(), [1]))
+list(executor.map(lambda _: gc.collect(), [1]))
 print("ok")
 """
 

@@ -1,0 +1,4 @@
+[toolchain]
+# Update CI.yml too when changing this:
+channel = "1.98.1"
+components = ["rustfmt", "clippy"]

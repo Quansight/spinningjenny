@@ -2,9 +2,15 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable
 from threading import Condition, Lock, RLock
-from time import sleep
+from time import sleep, time_ns
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable
 
 import pytest
+from hypothesis import given
+from hypothesis import strategies as st
 
 from spinningjenny import ThreadPoolExecutor
 from spinningjenny._testing import run_for_usecs
@@ -17,20 +23,30 @@ from spinningjenny._testing import run_for_usecs
         (lambda a, b: a + b, [range(1, 1001), range(2, 1002)]),
     ],
 )
-@pytest.mark.parametrize("n_jobs", [1, 2, 4])
-def test_parallel_thread_map_results(
-    func: Callable, arguments: list[Iterable], n_jobs: int
+@pytest.mark.parametrize("n_threads", [1, 2, 4])
+@pytest.mark.parametrize("return_in_order,to_list", [(True, list), (False, sorted)])
+def test_map_results(
+    func: Callable,
+    arguments: list[Iterable],
+    n_threads: int,
+    return_in_order: bool,
+    to_list: Callable[[Iterable], list],
 ) -> None:
     """
-    ``map_unordered()`` gives the same results as Python built-in ``map()``.
-
-    Other than order, anyway.
+    ``ThreadPoolExecutor.map()`` gives the exact same results as ``map()`` by
+    default, or if ``return_in_order=True`` is passed in.  If
+    ``return_in_order=False``, results may be out of order.
     """
     expected = list(map(func, *arguments))
-    with ThreadPoolExecutor(n_jobs) as pool:
-        actual = pool.map_unordered(func, *arguments)
+    with ThreadPoolExecutor(n_threads) as pool:
+        actual = pool.map(func, *arguments, return_in_order=return_in_order)
         assert not isinstance(actual, list)
-        assert expected == sorted(actual)
+        assert expected == to_list(actual)
+
+        # Omitting return_in_order= is the same as return_in_order=True:
+        actual = pool.map(func, *arguments)
+        assert not isinstance(actual, list)
+        assert expected == list(actual)
 
 
 class Resource:
@@ -65,9 +81,12 @@ class ResourceFactory:
 
 
 @pytest.mark.parametrize("usecs", [0, 10, 100])
-@pytest.mark.parametrize("num_threads", [2, 4, 6])
+@pytest.mark.parametrize("num_threads", [1, 2, 4, 5])
 @pytest.mark.parametrize("buffersize", [None, 10, 100])
-def test_resource_usage(usecs: int, num_threads: int, buffersize: None | int) -> None:
+@pytest.mark.parametrize("return_in_order", [True, False])
+def test_resource_usage(
+    usecs: int, num_threads: int, buffersize: None | int, return_in_order: bool
+) -> None:
     """
     The amounts of resources used by the executor should be constained.
 
@@ -82,8 +101,11 @@ def test_resource_usage(usecs: int, num_threads: int, buffersize: None | int) ->
         run_for_usecs(usecs)
 
     with ThreadPoolExecutor(num_threads) as executor:
-        result = executor.map_unordered(
-            task, (factory.create() for _ in range(1000)), buffersize=buffersize
+        result = executor.map(
+            task,
+            (factory.create() for _ in range(1000)),
+            buffersize=buffersize,
+            return_in_order=return_in_order,
         )
         assert len(list(result)) == 1000
     # Give it some leeway in case it goes over:
@@ -106,39 +128,50 @@ class TasksRun:
             return self.ran
 
 
-@pytest.mark.parametrize("num_threads", [2, 4, 6])
-def test_buffersize_limits_execution_when_no_iteration(num_threads: int) -> None:
+@pytest.mark.parametrize("return_in_order", [True, False])
+@pytest.mark.parametrize("num_threads", [1, 2, 4, 5])
+def test_buffersize_limits_execution_when_no_iteration(
+    num_threads: int, return_in_order: bool
+) -> None:
     """
     If ``buffersize`` is set, at most ``buffersize + num_threads`` tasks can be
     executed before work stops so long as no iteration is happening.
     """
     tasks = TasksRun()
     with ThreadPoolExecutor(num_threads) as executor:
-        result = executor.map_unordered(
-            lambda _: tasks.run(), range(100), buffersize=20
+        result = executor.map(
+            lambda _: tasks.run(),
+            range(100),
+            buffersize=20,
+            return_in_order=return_in_order,
         )
+        # _is_full() is a private API specifically designed for testing:
         while not result._is_full():
             pass
-        ran = tasks.get_ran()
-        assert 20 <= ran <= 20 + num_threads
+        first_ran = tasks.get_ran()
+        # At least half should've run:
+        assert 10 <= first_ran <= 20 + num_threads
         # If we're full, sleeping should only be able to add tasks in the race
         # condition between hitting full and the rest of the threads finishing
         # a task and blocking on sending to the full queue:
         sleep(0.01)
-        assert 20 <= tasks.get_ran() <= 20 + num_threads
+        assert 10 <= tasks.get_ran() <= 20 + num_threads
         next(result)
         next(result)
         next(result)
         while not result._is_full():
             pass
-        assert 23 <= tasks.get_ran() <= ran + num_threads + 3
+        assert first_ran <= tasks.get_ran() <= 20 + num_threads + 3
         # Get the rest, ensure everything ran:
         list(result)
         assert tasks.get_ran() == 100
 
 
+@pytest.mark.parametrize("return_in_order", [True, False])
 @pytest.mark.parametrize("buffersize", [None, 5])
-def test_drop_without_iterating_over_all_items(buffersize: None | int) -> None:
+def test_drop_without_iterating_over_all_items(
+    buffersize: None | int, return_in_order: bool
+) -> None:
     """
     Dropping the results iterator doesn't stop execution.
     """
@@ -154,7 +187,9 @@ def test_drop_without_iterating_over_all_items(buffersize: None | int) -> None:
         return x
 
     with ThreadPoolExecutor(2) as executor:
-        iterator = executor.map_unordered(inc, range(1000), buffersize=buffersize)
+        iterator = executor.map(
+            inc, range(1000), buffersize=buffersize, return_in_order=return_in_order
+        )
         next(iterator)
         del iterator
 
@@ -163,10 +198,14 @@ def test_drop_without_iterating_over_all_items(buffersize: None | int) -> None:
     assert sorted(counter) == list(range(1000))
 
 
-def test_drop_does_not_panic() -> None:
+@pytest.mark.parametrize("return_in_order", [True, False])
+@pytest.mark.parametrize("buffersize", [None, 5])
+def test_drop_does_not_panic(buffersize: None | int, return_in_order: bool) -> None:
     """Dropping the results iterator doesn't panic."""
     executor = ThreadPoolExecutor(2)
-    it = executor.map_unordered(lambda x: x, range(1000), buffersize=5)
+    it = executor.map(
+        lambda x: x, range(1000), buffersize=buffersize, return_in_order=return_in_order
+    )
     next(it)
     del it
 
@@ -174,6 +213,40 @@ def test_drop_does_not_panic() -> None:
 def test_bad_buffersize() -> None:
     """`buffersize` must be > 0."""
     with ThreadPoolExecutor(2) as pool:
-        for i in [-100, -1, 0]:
-            with pytest.raises(ValueError, match="buffersize must be"):
-                pool.map_unordered(lambda x: 1, range(2), buffersize=i)
+        with pytest.raises(ValueError, match="buffersize must be"):
+            pool.map(lambda x: 1, range(2), buffersize=0)
+        for i in [-100, -1]:
+            with pytest.raises(OverflowError):
+                pool.map(lambda x: 1, range(2), buffersize=i)
+
+
+@given(
+    st.lists(st.integers(0, 100_000), max_size=1000),
+    st.integers(1, 100) | st.none(),
+)
+def test_return_in_order_delivery_property_test(
+    sleep_nanos: list[int], buffersize: int | None
+) -> None:
+    """
+    Messages are delivered in order.
+    """
+
+    # Messages are only delivered after a random delay, so order is not
+    # guaranteed from execution time at least.
+    def sleep_and_return(index, nanos):
+        start = time_ns()
+        while time_ns() - start < nanos:
+            pass
+        return index
+
+    with ThreadPoolExecutor(4) as executor:
+        result = list(
+            executor.map(
+                sleep_and_return,
+                range(len(sleep_nanos)),
+                sleep_nanos,
+                buffersize=buffersize,
+            )
+        )
+
+    assert result == list(range(len(sleep_nanos)))

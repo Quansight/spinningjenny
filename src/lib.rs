@@ -1,43 +1,53 @@
 use pyo3::prelude::*;
 
+mod ordered;
+
 /// A faster ThreadPoolExecutor.
 #[pymodule]
 #[pyo3(name = "_spinningjenny")]
 mod spinningjenny {
     use std::{
         cell::{Cell, RefCell},
-        sync::atomic::{AtomicU64, Ordering},
+        sync::{
+            Mutex,
+            atomic::{AtomicU64, Ordering},
+        },
     };
 
     use crossbeam_channel::{Receiver, TrySendError, bounded, unbounded};
     use pyo3::{exceptions::PyValueError, intern, prelude::*, types::PyTuple};
     use rayon::{ThreadPool, ThreadPoolBuilder};
 
+    use crate::ordered::OrderedResults;
+
+    /// Result of calling a function.
+    type PyOutcome = PyResult<Py<PyAny>>;
+
     #[pyclass]
-    struct ResultIter {
-        receiver: Receiver<PyResult<Py<PyAny>>>,
+    struct UnorderedResultIter {
+        receiver: Receiver<(usize, PyOutcome)>,
     }
 
-    impl ResultIter {
-        fn new(receiver: Receiver<PyResult<Py<PyAny>>>) -> Self {
+    impl UnorderedResultIter {
+        fn new(receiver: Receiver<(usize, PyOutcome)>) -> Self {
             Self { receiver: receiver }
         }
     }
 
     #[pymethods]
-    impl ResultIter {
+    impl UnorderedResultIter {
         fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
             slf
         }
 
-        fn __next__(&self, py: Python<'_>) -> Option<PyResult<Py<PyAny>>> {
+        fn __next__(&self, py: Python<'_>) -> Option<PyOutcome> {
             // First, non-blocking fast pass:
-            if let Some(result) = self.receiver.try_recv().ok() {
+            if let Some((_, result)) = self.receiver.try_recv().ok() {
                 return Some(result);
             }
             // If that fails, detach from Python and then block on recv():
             let receiver = &self.receiver;
-            py.detach(|| receiver.recv().ok())
+            py.detach(|| receiver.recv().ok().map(|result| result.1))
         }
 
         /// Is the receiver buffer full? Intended for use by tests only.
@@ -47,15 +57,58 @@ mod spinningjenny {
         }
     }
 
+    #[pyclass]
+    struct OrderedResultIter {
+        results: Mutex<OrderedResults<PyOutcome>>,
+    }
+
+    impl OrderedResultIter {
+        fn new(results: OrderedResults<PyOutcome>) -> Self {
+            Self {
+                results: Mutex::new(results),
+            }
+        }
+    }
+
+    #[pymethods]
+    impl OrderedResultIter {
+        fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+            slf
+        }
+
+        fn __next__(&self, py: Python<'_>) -> Option<PyOutcome> {
+            // Avoid blocking here, so we have consistent lock acquisition order
+            // and don't deadlock. First, non-blocking fast pass:
+            if let Some(result) = self
+                .results
+                .try_lock()
+                .ok()
+                .and_then(|mut results| results.try_next().ok())
+            {
+                return Some(result);
+            }
+
+            // If that fails, detach from Python and then block on recv():
+            let results = &self.results;
+            py.detach(|| results.lock().unwrap().next())
+        }
+
+        /// Is the receiver buffer full? Intended for use by tests only.
+        fn _is_full(&self, py: Python<'_>) -> bool {
+            let results = &self.results;
+            py.detach(|| results.lock().unwrap()._is_full())
+        }
+    }
+
     thread_local! {
-        // The `contextvars` Context to run functions in.
+        // A cached copy of the `contextvars` Context to run functions in.
         pub static CONTEXTVARS_CONTEXT: RefCell<Option<Py<PyAny>>> = const { RefCell::new(None) };
-        // Each `map_unordered()` call in the current thread increments the
-        // generation, so we can distinguish contexts between them..
+        // The current generation of `contextvars` Context; if this changes, a
+        // new copy of the parent context will need to be made.
         pub static GENERATION: Cell<u64> = const { Cell::new(0) };
     }
 
-    /// Each `map_unordered()` call in the increments the global generation, so
+    /// Each `map()` call in the increments the global generation, so
     /// we can distinguish contexts between them.
     static GLOBAL_GENERATION: AtomicU64 = AtomicU64::new(0);
 
@@ -122,14 +175,15 @@ mod spinningjenny {
             })
         }
 
-        #[pyo3(signature = (func, *iterables, buffersize = None))]
-        fn map_unordered(
+        #[pyo3(signature = (func, *iterables, buffersize = None, return_in_order = true))]
+        fn map(
             &self,
             py: Python<'_>,
             func: Py<PyAny>,
             mut iterables: Vec<Py<PyAny>>,
-            buffersize: Option<isize>,
-        ) -> PyResult<Py<ResultIter>> {
+            buffersize: Option<usize>,
+            return_in_order: bool,
+        ) -> PyResult<Py<PyAny>> {
             // Copy the current contextvars context:
             let context = self.copy_context.call0(py)?;
             // zip(*((itertools.repeat(func),) + iterables)), so we can get
@@ -139,32 +193,56 @@ mod spinningjenny {
             iterables.insert(0, func_iterable);
             let iterables = PyTuple::new(py, iterables)?;
             let py_iterator = self.zip.bind(py).call1(iterables)?.try_iter()?.unbind();
+            let n_threads = self.pool.current_num_threads();
 
             let (sender, receiver) = if let Some(buffersize) = buffersize {
                 if buffersize < 1 {
                     return Err(PyValueError::new_err("buffersize must be >= 1"));
                 }
-                bounded(buffersize as usize)
+                if return_in_order {
+                    // Buffering also happens in the OrderedResults instance, so
+                    // split the difference.
+                    bounded((buffersize / 2).max(1))
+                } else {
+                    bounded(buffersize)
+                }
             } else {
                 unbounded()
             };
+
+            let (ordered_results, ordered_producer) = if return_in_order {
+                let (results, producer) = OrderedResults::new(
+                    receiver.clone(),
+                    buffersize.map(|bsize| (bsize / 2).max(1)),
+                );
+                (Some(results), producer)
+            } else {
+                (None, None)
+            };
+
+            let run_locally_internal = (4 * n_threads).min(buffersize.unwrap_or(usize::MAX));
 
             // A unique id for the contextvars context associated with this
             // call.
             let generation = new_generation();
 
-            let n_threads = self.pool.current_num_threads();
             // Iterate over the Python iterator in the thread pool, and spawn
-            // tasks there. The LIFO nature of Rayon's spawn() should ensure
-            // lazy iteration over the Python iterator.
+            // tasks there.
             self.pool.spawn(move || {
                 let orig_sender = sender.clone();
                 let result = Python::attach(move |iterating_py| {
-                    for (i, arguments) in py_iterator.bind(iterating_py).into_iter().enumerate() {
-                        let arguments = arguments?.extract::<Py<PyTuple>>()?;
+                    for (message_index, arguments) in
+                        py_iterator.bind(iterating_py).into_iter().enumerate()
+                    {
+                        let arguments = || -> PyResult<Py<PyTuple>> {
+                            Ok(arguments?.extract::<Py<PyTuple>>()?)
+                        }()
+                        .map_err(|err| (message_index, err))?;
                         let context = context.clone_ref(iterating_py);
                         let sender = sender.clone();
-                        // This will spawn within the current pool.
+
+                        // Schedule running the Python task within Rayon. This
+                        // will spawn within the current pool.
                         rayon::spawn_fifo(move || {
                             Python::attach(move |thread_py| {
                                 let result = thread_local_context(thread_py, context, generation)
@@ -178,32 +256,51 @@ mod spinningjenny {
                                 // We don't want to block while attached, since that
                                 // can block Python GC, resulting in deadlock when
                                 // buffersize is set and these threads block.
-                                if let Err(TrySendError::Full(result)) = sender.try_send(result) {
+                                if let Err(TrySendError::Full(to_resend)) =
+                                    sender.try_send((message_index, result))
+                                {
                                     // If we get an error sending, that
                                     // means the Receiver has been dropped.
                                     // So not much we can do.
-                                    let _ = thread_py.detach(|| sender.send(result));
+                                    let _ = thread_py.detach(|| sender.send(to_resend));
                                 };
                             });
                         });
+                        // If map is in order, there is a buffer size, and the
+                        // buffer is full, we'll need to wait until there is
+                        // room in the downstream buffer to read more tasks from
+                        // the task iterator.
+                        if let Some(ref ordered_producer) = ordered_producer
+                            && ordered_producer.is_full()
+                        {
+                            // Take the opportunity to process a task.
+                            rayon::yield_local();
+                            // Next, wait for buffer space to clear up:
+                            iterating_py.detach(|| ordered_producer.wait_for_buffer_space());
+                        }
+
                         // Occasionally take a break from iterating to run some
                         // tasks in this thread, so that we don't load too many
                         // tasks into memory. Other threads should steal from
                         // this one, so just because this one runs out of tasks
                         // doesn't mean no work is being done.
-                        if i.is_multiple_of(4 * n_threads) {
+                        if message_index > 0 && message_index.is_multiple_of(run_locally_internal) {
                             while rayon::yield_local() != Some(rayon::Yield::Idle) {}
                         }
                     }
-                    PyResult::Ok(())
+                    Result::<(), (usize, PyErr)>::Ok(())
                 });
-                if let Err(err) = result {
+                if let Err((message_index, err)) = result {
                     // If we get an error, that means the Receiver has been
                     // dropped. So not much we can do.
-                    let _ = orig_sender.send(Err(err));
+                    let _ = orig_sender.send((message_index, Err(err)));
                 }
             });
-            Py::new(py, ResultIter::new(receiver))
+            Ok(if let Some(ordered_results) = ordered_results {
+                Py::new(py, OrderedResultIter::new(ordered_results))?.into_any()
+            } else {
+                Py::new(py, UnorderedResultIter::new(receiver))?.into_any()
+            })
         }
 
         fn __enter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
