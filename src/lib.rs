@@ -15,7 +15,12 @@ mod spinningjenny {
     };
 
     use crossbeam_channel::{Receiver, TrySendError, bounded, unbounded};
-    use pyo3::{exceptions::PyValueError, intern, prelude::*, types::PyTuple};
+    use pyo3::{
+        exceptions::PyValueError,
+        intern,
+        prelude::*,
+        types::{PyCFunction, PyTuple},
+    };
     use rayon::{ThreadPool, ThreadPoolBuilder};
 
     use crate::ordered::OrderedResults;
@@ -229,9 +234,12 @@ mod spinningjenny {
             // call.
             let generation = new_generation();
 
-            // Iterate over the Python iterator in the thread pool, and spawn
-            // tasks there.
-            self.pool.spawn(move || {
+            // For use in the iterating driver.
+            let context2 = context.call_method0(py, "copy")?;
+
+            // Iterate over the Python iterator and schedule corresponding tasks
+            // in the thread pool.
+            let iterator_driver = move || {
                 let orig_sender = sender.clone();
                 let result = Python::attach(move |iterating_py| {
                     let mut last_index_when_we_ran_tasks = 0;
@@ -307,7 +315,29 @@ mod spinningjenny {
                     // dropped. So not much we can do.
                     let _ = orig_sender.send((message_index, Err(err)));
                 }
+            };
+
+            // PyCFunction takes a Fn(), iterator_driver is FnOnce(), so use a
+            // Mutex<Option> to allow calling the latter from the former.
+            let iterator_driver = Mutex::new(Some(iterator_driver));
+            let iterator_driver = PyCFunction::new_closure(py, None, None, move |_, _| {
+                if let Some(f) = iterator_driver.lock().unwrap().take() { f() }
+                PyResult::<()>::Ok(())
+            })?
+            .unbind();
+
+            // Spawn the iterating driver in the thread pool, making sure to
+            // iterate under the appropriate contextvars context.
+            self.pool.spawn(move || {
+                Python::attach(|iterating_py| {
+                    let _result = context2.call_method1(
+                        iterating_py,
+                        intern!(iterating_py, "run"),
+                        (iterator_driver.bind(iterating_py),),
+                    );
+                })
             });
+
             Ok(if let Some(ordered_results) = ordered_results {
                 Py::new(py, OrderedResultIter::new(ordered_results))?.into_any()
             } else {

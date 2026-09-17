@@ -67,3 +67,25 @@ def test_contextvars_interleaved(
 
     for value, it in enumerate(result_iterators):
         assert list(it) == [value] * 1000
+
+
+@pytest.mark.parametrize("return_in_order", [True, False])
+def test_iterators_have_the_set_contextvars(return_in_order: bool) -> None:
+    """
+    `ContextVar`s created before a `map()` are set for the iterator that
+    creates inputs.
+
+    Reproducer for https://github.com/Quansight/spinningjenny/issues/18
+    """
+    value = ContextVar("value", default="missing")
+    value.set("caller")
+    seen = []
+
+    def inputs():
+        seen.append(value.get())
+        yield 1
+
+    with ThreadPoolExecutor(2) as pool:
+        list(pool.map(lambda _: None, inputs(), return_in_order=return_in_order))
+
+    assert seen == ["caller"]
