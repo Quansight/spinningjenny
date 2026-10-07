@@ -23,6 +23,12 @@ def noop(_x):
     pass
 
 
+def spin_nanos(nanos):
+    start = time_ns()
+    while time_ns() - start < nanos:
+        pass
+
+
 class OrigExecutor(OrigExecutor):
     def map(self, *args, buffersize=None, return_in_order=True):
         return super().map(*args, buffersize=buffersize)
@@ -87,8 +93,10 @@ def test_one_thousand_calls(
     assert len(result) == 1000
 
 
+# Keep function-based benchmark grouping available across the whole suite.
+@pytest.mark.parametrize("function", [spin_nanos])
 @pytest.mark.parametrize("return_in_order", [True, False])
-def test_adversarial_delays(benchmark, return_in_order):
+def test_adversarial_delays(benchmark, function, return_in_order):
     """
     A message execution pattern that demonstrates when out-of-order execution
     is helpful.
@@ -96,16 +104,11 @@ def test_adversarial_delays(benchmark, return_in_order):
     sleep_nanos = ([1_000_000] + [1_000] * 99) * 100
     sleep_nanos.reverse()
 
-    def spin_nanos(nanos):
-        start = time_ns()
-        while time_ns() - start < nanos:
-            pass
-
     def run():
         with SpinExecutor(4) as executor:
             list(
                 executor.map(
-                    spin_nanos,
+                    function,
                     sleep_nanos,
                     buffersize=100,
                     return_in_order=return_in_order,
