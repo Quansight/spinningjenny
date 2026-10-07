@@ -166,9 +166,6 @@ mod spinningjenny {
                 .eval(c"__import__('itertools').repeat", None, None)?
                 .unbind();
             let pool_builder = ThreadPoolBuilder::new().num_threads(n_threads as usize);
-            // TODO: Remove this version gate once PyO3
-            // restores its attachment count only after reattaching succeeds.
-            #[cfg(Py_3_14)]
             let pool_builder = pool_builder.spawn_handler(|thread| {
                 // stay detached while idle so parked workers don't
                 // deadlock with the interpreter
