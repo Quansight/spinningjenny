@@ -286,7 +286,7 @@ mod spinningjenny {
                             let slots_available = ordered_producer.slots_available();
                             if slots_available == 0 {
                                 // Take the opportunity to do some work:
-                                rayon::yield_now();
+                                iterating_py.detach(rayon::yield_now);
                                 // Wait for buffer space to become available:
                                 iterating_py.detach(|| ordered_producer.wait_for_buffer_space());
                             } else if message_index - last_index_when_we_ran_tasks > slots_available
@@ -294,7 +294,9 @@ mod spinningjenny {
                                 // Buffer is starting to fill up, so do some
                                 // work to prevent iterating too much and go
                                 // beyond the desired number of tasks in memory.
-                                while rayon::yield_now() != Some(rayon::Yield::Idle) {}
+                                iterating_py.detach(|| {
+                                    while rayon::yield_now() != Some(rayon::Yield::Idle) {}
+                                });
                             }
                         }
 
@@ -304,7 +306,9 @@ mod spinningjenny {
                         // one, so just because this one runs out of tasks
                         // doesn't mean no work is being done.
                         if message_index > 0 && message_index.is_multiple_of(run_locally_interval) {
-                            while rayon::yield_local() != Some(rayon::Yield::Idle) {}
+                            iterating_py.detach(|| {
+                                while rayon::yield_local() != Some(rayon::Yield::Idle) {}
+                            });
                             last_index_when_we_ran_tasks = message_index;
                         }
                     }
@@ -313,7 +317,9 @@ mod spinningjenny {
                 if let Err((message_index, err)) = result {
                     // If we get an error, that means the Receiver has been
                     // dropped. So not much we can do.
-                    let _ = orig_sender.send((message_index, Err(err)));
+                    Python::attach(|py| {
+                        let _ = py.detach(|| orig_sender.send((message_index, Err(err))));
+                    });
                 }
             };
 
