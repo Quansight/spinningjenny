@@ -73,21 +73,22 @@ class Sklearn(Joblib):
 @pytest.mark.parametrize("function", [noop, spin_10us, spin_100us])
 @pytest.mark.parametrize(
     "executor_factory",
-    [OrigExecutor, SpinExecutor, thread_local_pool, Sequential, Joblib, Sklearn],
+    [OrigExecutor, thread_local_orig_executor, SpinExecutor, thread_local_pool, Sequential, Joblib, Sklearn],
 )
 @pytest.mark.parametrize("return_in_order", [True, False])
 def test_one_thousand_calls(
     benchmark, buffersize, function, executor_factory, return_in_order
 ):
     def run():
-        with executor_factory(8) as executor:
-            result = executor.map(
-                function,
-                range(1000),
-                buffersize=buffersize,
-                return_in_order=return_in_order,
-            )
-            return list(result)
+        executor = executor_factory(8)
+        result = list(executor.map(
+            function,
+            range(1000),
+            buffersize=buffersize,
+            return_in_order=return_in_order,
+        ))
+        del executor
+        return list(result)
 
     result = benchmark(run)
     assert len(result) == 1000
