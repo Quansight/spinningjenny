@@ -1,5 +1,6 @@
 from concurrent.futures import ThreadPoolExecutor as OrigExecutor
 from time import time_ns
+import threading
 
 import pytest
 from joblib import Parallel, delayed
@@ -32,6 +33,27 @@ def spin_nanos(nanos):
 class OrigExecutor(OrigExecutor):
     def map(self, *args, buffersize=None, return_in_order=True):
         return super().map(*args, buffersize=buffersize)
+
+
+class _LocalOrigExecutorStorage(threading.local):
+    """Store and retrieve a cached thread-local ``OrigExecutor``."""
+    pool = None
+    n_threads = None
+
+    def get(self, n_threads: int) -> OrigExecutor:
+        """Get or create a cached pool, if the number of threads matches."""
+        if n_threads == self.n_threads and self.pool is not None:
+            return self.pool
+
+        self.pool = OrigExecutor(n_threads)
+        self.n_threads = n_threads
+        return self.pool
+
+_LOCAL_ORIG_EXECUTOR = _LocalOrigExecutorStorage()
+
+
+def thread_local_orig_executor(n_threads: int) -> OrigExecutor:
+    return _LOCAL_ORIG_EXECUTOR.get(n_threads)
 
 
 class Sequential:
