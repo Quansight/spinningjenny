@@ -37,6 +37,7 @@ class OrigExecutor(OrigExecutor):
 
 class _LocalOrigExecutorStorage(threading.local):
     """Store and retrieve a cached thread-local ``OrigExecutor``."""
+
     pool = None
     n_threads = None
 
@@ -48,6 +49,7 @@ class _LocalOrigExecutorStorage(threading.local):
         self.pool = OrigExecutor(n_threads)
         self.n_threads = n_threads
         return self.pool
+
 
 _LOCAL_ORIG_EXECUTOR = _LocalOrigExecutorStorage()
 
@@ -95,7 +97,15 @@ class Sklearn(Joblib):
 @pytest.mark.parametrize("function", [noop, spin_10us, spin_100us])
 @pytest.mark.parametrize(
     "executor_factory",
-    [OrigExecutor, thread_local_orig_executor, SpinExecutor, thread_local_pool, Sequential, Joblib, Sklearn],
+    [
+        OrigExecutor,
+        thread_local_orig_executor,
+        SpinExecutor,
+        thread_local_pool,
+        Sequential,
+        Joblib,
+        Sklearn,
+    ],
 )
 @pytest.mark.parametrize("return_in_order", [True, False])
 def test_one_thousand_calls(
@@ -103,12 +113,14 @@ def test_one_thousand_calls(
 ):
     def run():
         executor = executor_factory(8)
-        result = list(executor.map(
-            function,
-            range(1000),
-            buffersize=buffersize,
-            return_in_order=return_in_order,
-        ))
+        result = list(
+            executor.map(
+                function,
+                range(1000),
+                buffersize=buffersize,
+                return_in_order=return_in_order,
+            )
+        )
         del executor
         return list(result)
 
