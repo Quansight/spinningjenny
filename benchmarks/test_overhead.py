@@ -1,6 +1,6 @@
+import threading
 from concurrent.futures import ThreadPoolExecutor as OrigExecutor
 from time import time_ns
-import threading
 
 import pytest
 from joblib import Parallel, delayed
