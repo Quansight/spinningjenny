@@ -10,7 +10,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 crossbeam-channel = "0.5.16"
-pyo3 = "0.29.0"
+pyo3 = "0.29.3"
 rayon = "1.12.0"
 
 [profile.release]
