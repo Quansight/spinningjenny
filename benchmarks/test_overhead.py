@@ -1,3 +1,4 @@
+import threading
 from concurrent.futures import ThreadPoolExecutor as OrigExecutor
 from time import time_ns
 
@@ -32,6 +33,29 @@ def spin_nanos(nanos):
 class OrigExecutor(OrigExecutor):
     def map(self, *args, buffersize=None, return_in_order=True):
         return super().map(*args, buffersize=buffersize)
+
+
+class _LocalOrigExecutorStorage(threading.local):
+    """Store and retrieve a cached thread-local ``OrigExecutor``."""
+
+    pool = None
+    n_threads = None
+
+    def get(self, n_threads: int) -> OrigExecutor:
+        """Get or create a cached pool, if the number of threads matches."""
+        if n_threads == self.n_threads and self.pool is not None:
+            return self.pool
+
+        self.pool = OrigExecutor(n_threads)
+        self.n_threads = n_threads
+        return self.pool
+
+
+_LOCAL_ORIG_EXECUTOR = _LocalOrigExecutorStorage()
+
+
+def thread_local_orig_executor(n_threads: int) -> OrigExecutor:
+    return _LOCAL_ORIG_EXECUTOR.get(n_threads)
 
 
 class Sequential:
@@ -73,21 +97,32 @@ class Sklearn(Joblib):
 @pytest.mark.parametrize("function", [noop, spin_10us, spin_100us])
 @pytest.mark.parametrize(
     "executor_factory",
-    [OrigExecutor, SpinExecutor, thread_local_pool, Sequential, Joblib, Sklearn],
+    [
+        OrigExecutor,
+        thread_local_orig_executor,
+        SpinExecutor,
+        thread_local_pool,
+        Sequential,
+        Joblib,
+        Sklearn,
+    ],
 )
 @pytest.mark.parametrize("return_in_order", [True, False])
 def test_one_thousand_calls(
     benchmark, buffersize, function, executor_factory, return_in_order
 ):
     def run():
-        with executor_factory(8) as executor:
-            result = executor.map(
+        executor = executor_factory(8)
+        result = list(
+            executor.map(
                 function,
                 range(1000),
                 buffersize=buffersize,
                 return_in_order=return_in_order,
             )
-            return list(result)
+        )
+        del executor
+        return list(result)
 
     result = benchmark(run)
     assert len(result) == 1000
