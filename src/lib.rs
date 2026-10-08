@@ -19,7 +19,7 @@ mod spinningjenny {
         exceptions::PyValueError,
         intern,
         prelude::*,
-        types::{PyCFunction, PyTuple},
+        types::{PyCFunction, PyDict, PyTuple},
     };
     use rayon::{ThreadPool, ThreadPoolBuilder};
 
@@ -151,6 +151,8 @@ mod spinningjenny {
         zip: Py<PyAny>,
         /// Python's `itertools.repeat`:
         repeat: Py<PyAny>,
+        /// Python's `concurrent.futures.Future`:
+        py_future: Py<PyAny>,
     }
 
     #[pymethods]
@@ -162,9 +164,8 @@ mod spinningjenny {
             }
             let copy_context = py.import("contextvars")?.getattr("copy_context")?.unbind();
             let zip = py.eval(c"zip", None, None)?.unbind();
-            let repeat = py
-                .eval(c"__import__('itertools').repeat", None, None)?
-                .unbind();
+            let py_future = py.import("concurrent.futures")?.getattr("Future")?.unbind();
+            let repeat = py.import("itertools")?.getattr("repeat")?.unbind();
             let pool_builder = ThreadPoolBuilder::new().num_threads(n_threads as usize);
             let pool_builder = pool_builder.spawn_handler(|thread| {
                 // stay detached while idle so parked workers don't
@@ -176,8 +177,58 @@ mod spinningjenny {
                 copy_context,
                 zip,
                 repeat,
+                py_future,
                 pool: pool_builder.build().expect("TODO handle error"),
             })
+        }
+
+        #[pyo3(signature = (r#fn, /, *args, **kwargs))]
+        fn submit(
+            &self,
+            py: Python<'_>,
+            r#fn: Py<PyAny>,
+            args: Py<PyTuple>,
+            kwargs: Option<Py<PyDict>>,
+        ) -> PyResult<Py<PyAny>> {
+            let func = r#fn;
+            let future = self.py_future.bind(py).call0()?;
+            let result = future.clone().unbind();
+            let future = future.unbind();
+
+            self.pool.spawn(move || {
+                Python::attach(|thread_py| {
+                    let future = future.bind(thread_py);
+                    // Check if the future was cancelled:
+                    if !future
+                        .call_method0(intern!(thread_py, "set_running_or_notify_cancel"))
+                        .expect("Method should never raise")
+                        .extract::<bool>()
+                        .expect("Method returned wrong type")
+                    {
+                        return;
+                    }
+
+                    // If not, run the task and store its result/exception in the Future:
+                    match func.call(
+                        thread_py,
+                        args,
+                        kwargs.as_ref().map(|kw| kw.bind(thread_py)),
+                    ) {
+                        PyResult::Err(error) => {
+                            future
+                                .call_method1(intern!(thread_py, "set_exception"), (error,))
+                                .expect("Method should never raise");
+                        }
+                        PyResult::Ok(result) => {
+                            future
+                                .call_method1(intern!(thread_py, "set_result"), (result,))
+                                .expect("Method should never raise");
+                        }
+                    }
+                });
+            });
+
+            Ok(result)
         }
 
         #[pyo3(signature = (func, *iterables, buffersize = None, return_in_order = true))]
@@ -324,7 +375,9 @@ mod spinningjenny {
             // Mutex<Option> to allow calling the latter from the former.
             let iterator_driver = Mutex::new(Some(iterator_driver));
             let iterator_driver = PyCFunction::new_closure(py, None, None, move |_, _| {
-                if let Some(f) = iterator_driver.lock().unwrap().take() { f() }
+                if let Some(f) = iterator_driver.lock().unwrap().take() {
+                    f()
+                }
                 PyResult::<()>::Ok(())
             })?
             .unbind();
