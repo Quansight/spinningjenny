@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
-from threading import Condition, Lock, RLock
+from threading import Condition, Lock, RLock, get_ident as threading_get_ident
 from time import sleep, time_ns
 from typing import TYPE_CHECKING
 
@@ -257,3 +257,55 @@ def test_return_in_order_delivery_property_test(
         )
 
     assert result == list(range(len(sleep_nanos)))
+
+
+@pytest.mark.parametrize(
+    ("func", "args", "kwargs", "expected"),
+    [
+        (lambda: 123, (), {}, 123),
+        (sum, ([2, 3],), {}, 5),
+        (lambda a, b: a + b, (2,), {"b": 7}, 9),
+    ],
+)
+def test_submit_success(func, args, kwargs, expected):
+    """
+    ``ThreadPoolExecutor.submit()`` runs the function and stores its
+    results in the returned ``Future``.
+    """
+    executor = ThreadPoolExecutor(2)
+    future = executor.submit(func, *args, **kwargs)
+    assert future.result() == expected
+
+
+def test_submit_exception():
+    """
+    ``ThreadPoolExecutor.submit()`` runs the function and stores its
+    exception in the returned ``Future``.
+    """
+    executor = ThreadPoolExecutor(2)
+    future = executor.submit(lambda: 1 / 0)
+    with pytest.raises(ZeroDivisionError):
+        future.result()
+
+
+def test_submitted_function_runs_in_thread_pool():
+    """
+    ``ThreadPoolExecutor.submit()`` runs the function in the thread pool.
+    """
+    executor = ThreadPoolExecutor(2)
+    results = []
+
+    def run():
+        sleep(0.0001)
+        return threading_get_ident()
+
+    for _ in range(100):
+        results.append(executor.submit(run))
+
+    thread_ids = {future.result() for future in results}
+    assert len(thread_ids) == 2
+    # Different threads than this one:
+    assert threading_get_ident() not in thread_ids
+
+
+# TODO cancellation
