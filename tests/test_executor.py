@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
+from concurrent.futures import CancelledError, Future
 from threading import Condition, Lock, RLock
+from threading import get_ident as threading_get_ident
 from time import sleep, time_ns
 from typing import TYPE_CHECKING
 
@@ -257,3 +259,90 @@ def test_return_in_order_delivery_property_test(
         )
 
     assert result == list(range(len(sleep_nanos)))
+
+
+@pytest.mark.parametrize(
+    ("func", "args", "kwargs", "expected"),
+    [
+        (lambda: 123, (), {}, 123),
+        (sum, ([2, 3],), {}, 5),
+        (lambda a, b: a + b, (2,), {"b": 7}, 9),
+    ],
+)
+def test_submit_success(
+    func: Callable[..., int],
+    args: tuple[int] | tuple[()],
+    kwargs: dict[str, int],
+    expected: int,
+) -> None:
+    """
+    ``ThreadPoolExecutor.submit()`` runs the function and stores its
+    results in the returned ``Future``.
+    """
+    executor = ThreadPoolExecutor(2)
+    future = executor.submit(func, *args, **kwargs)
+    assert isinstance(future, Future)
+    assert future.result() == expected
+
+
+def test_submit_exception() -> None:
+    """
+    ``ThreadPoolExecutor.submit()`` runs the function and stores its
+    exception in the returned ``Future``.
+    """
+    executor = ThreadPoolExecutor(2)
+    future = executor.submit(lambda: 1 / 0)
+    with pytest.raises(ZeroDivisionError):
+        future.result()
+
+
+def test_submitted_function_runs_in_thread_pool() -> None:
+    """
+    ``ThreadPoolExecutor.submit()`` runs the function in the thread pool.
+    """
+    executor = ThreadPoolExecutor(2)
+    results = []
+
+    def run():
+        sleep(0.0001)
+        return threading_get_ident()
+
+    for _ in range(100):
+        results.append(executor.submit(run))
+
+    thread_ids = {future.result() for future in results}
+    assert len(thread_ids) == 2
+    # Different threads than this one:
+    assert threading_get_ident() not in thread_ids
+
+
+def test_submit_respects_cancellation() -> None:
+    """
+    ``ThreadPoolExecutor.submit()`` won't run cancelled tasks.
+    """
+    executor = ThreadPoolExecutor(1)
+    result = []
+    lock = Lock()
+    lock.acquire()
+    futures: list[Future] = []
+
+    def run1():
+        result.append(1)
+        lock.acquire()
+        futures[1].cancel()
+
+    def run2():
+        result.append(2)
+
+    futures.append(executor.submit(run1))
+    # Wait for run1 to start:
+    while not result:
+        sleep(0.00001)
+    # Schedule run2:
+    futures.append(executor.submit(run2))
+    # Unblock run1, which should cancel run2, thus demonstrating we can cancel
+    # already queued tasks:
+    lock.release()
+    futures[0].result()
+    with pytest.raises(CancelledError):
+        futures[1].result()

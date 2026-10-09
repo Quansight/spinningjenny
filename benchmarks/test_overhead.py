@@ -116,3 +116,23 @@ def test_adversarial_delays(benchmark, function, return_in_order):
             )
 
     benchmark(run)
+
+
+@pytest.mark.parametrize("function", [noop])
+@pytest.mark.parametrize(
+    "executor_factory",
+    [OrigExecutor, SpinExecutor],
+)
+def test_one_thousand_submit_overhead(benchmark, executor_factory, function):
+    """Measure overhead of 1000 submit()s."""
+    executor = executor_factory(4)
+
+    def submit():
+        results = []
+        for _ in range(1000):
+            future = executor.submit(function, None)
+            results.append(future)
+        for future in results:
+            future.result()
+
+    benchmark(submit)
