@@ -324,7 +324,7 @@ def test_submit_respects_cancellation() -> None:
     result = []
     lock = Lock()
     lock.acquire()
-    futures = []
+    futures: list[Future] = []
 
     def run1():
         result.append(1)
