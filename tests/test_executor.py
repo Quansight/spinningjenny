@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable
 from concurrent.futures import CancelledError, Future
-from threading import Condition, Lock, RLock, get_ident as threading_get_ident
+from threading import Condition, Lock, RLock
+from threading import get_ident as threading_get_ident
 from time import sleep, time_ns
 from typing import TYPE_CHECKING
 
